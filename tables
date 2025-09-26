@@ -1,4 +1,80 @@
--Usuario:
-    -nombre
-    -correo
-    -contraseña (almacenada mediante )
+100 characters max input for all, database 130 ch
+
+    CREATE TABLE users (
+    uuid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    hashed_password TEXT NOT NULL, -- never store plain text
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE products (
+    uuid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name_es TEXT NOT NULL,
+    name_en TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE communes (
+    uuid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE companies (
+    uuid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_uuid UUID NOT NULL REFERENCES users(uuid),
+    product_uuid UUID NOT NULL REFERENCES products(uuid),
+    commune_uuid UUID NOT NULL REFERENCES communes(uuid),
+    name TEXT NOT NULL,
+    description_es TEXT,
+    description_en TEXT,
+    address TEXT,
+    phone TEXT,
+    email TEXT,
+    image_url TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+----------------------------------------------------------------------------------------------------4
+
+    CREATE TABLE users_deleted (
+    uuid UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    hashed_password TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE products_deleted (
+    uuid UUID PRIMARY KEY,
+    name_es TEXT NOT NULL,
+    name_en TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE communes_deleted (
+    uuid UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE companies_deleted (
+    uuid UUID PRIMARY KEY,
+    user_uuid UUID NOT NULL,
+    product_uuid UUID NOT NULL,
+    commune_uuid UUID NOT NULL,
+    name TEXT NOT NULL,
+    description_es TEXT,
+    description_en TEXT,
+    address TEXT,
+    phone TEXT,
+    email TEXT,
+    image_url TEXT,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

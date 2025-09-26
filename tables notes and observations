@@ -1,0 +1,27 @@
+Instead of a straight DELETE FROM users WHERE uuid = ..., you:
+
+BEGIN;
+
+INSERT INTO users_deleted
+SELECT *, NOW() as deleted_at FROM users WHERE uuid = 'some-uuid';
+
+DELETE FROM users WHERE uuid = 'some-uuid';
+
+COMMIT;
+
+
+-----------------------------------------------------------------
+
+Use a scheduler (depends on your stack: cron in a VM, pg_cron in Postgres, Kubernetes CronJob if you’re flexing infra). Query looks like:
+
+DELETE FROM users_deleted
+WHERE deleted_at < NOW() - INTERVAL '3 months';
+
+DELETE FROM products_deleted
+WHERE deleted_at < NOW() - INTERVAL '3 months';
+
+DELETE FROM communes_deleted
+WHERE deleted_at < NOW() - INTERVAL '3 months';
+
+DELETE FROM companies_deleted
+WHERE deleted_at < NOW() - INTERVAL '3 months';

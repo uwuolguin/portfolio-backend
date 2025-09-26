@@ -1,0 +1,87 @@
+Step 1 — Define what you want to search
+
+You have the tables:
+
+products (name, description, category, bilingual)
+
+companies (name, description, address, email, image_url, etc.)
+
+users (name, email)
+
+communes (name)
+
+You want the search to catch a keyword anywhere in the joined data for a company.
+
+Step 2 — Create a joined view
+
+Instead of searching each table separately, join all related tables around companies:
+
+CREATE MATERIALIZED VIEW company_search AS
+SELECT 
+    c.uuid AS company_id,
+    c.name AS company_name,
+    c.description_es AS company_description_es,
+    c.description_en AS company_description_en,
+    c.address,
+    c.email AS company_email,
+    p.name_es AS product_name_es,
+    p.name_en AS product_name_en,
+    p.description_es AS product_description_es,
+    p.description_en AS product_description_en,
+    p.category_es AS product_category_es,
+    p.category_en AS product_category_en,
+    u.name AS user_name,
+    u.email AS user_email,
+    cm.name AS commune_name
+FROM companies c
+LEFT JOIN products p ON p.uuid = c.product_uuid
+LEFT JOIN users u ON u.uuid = c.user_uuid
+LEFT JOIN communes cm ON cm.uuid = c.commune_uuid;
+
+
+✅ This gives you one row per company with all relevant text fields.
+
+Step 3 — Add a tsvector column for multi-language search
+ALTER MATERIALIZED VIEW company_search
+ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
+    to_tsvector('spanish',
+        coalesce(cast(company_name AS text),'') || ' ' ||
+        coalesce(company_description_es,'') || ' ' ||
+        coalesce(product_name_es,'') || ' ' ||
+        coalesce(product_description_es,'') || ' ' ||
+        coalesce(product_category_es,'') || ' ' ||
+        coalesce(commune_name,'') || ' ' ||
+        coalesce(user_name,'') || ' ' ||
+        coalesce(user_email,'')
+    )
+    ||
+    to_tsvector('english',
+        coalesce(company_name,'') || ' ' ||
+        coalesce(company_description_en,'') || ' ' ||
+        coalesce(product_name_en,'') || ' ' ||
+        coalesce(product_description_en,'') || ' ' ||
+        coalesce(product_category_en,'') || ' '
+    )
+) STORED;
+
+
+✅ All text is searchable in Spanish or English.
+✅ Handles nulls with coalesce.
+
+Step 4 — Add GIN index for performance
+CREATE INDEX idx_company_search_vector ON company_search USING GIN(search_vector);
+
+Step 5 — Query the “magic word”
+SELECT *
+FROM company_search
+WHERE search_vector @@ plainto_tsquery('spanish', 'queso')
+   OR search_vector @@ plainto_tsquery('english', 'cheese');
+
+
+✅ This gives you all companies where the keyword appears anywhere in the joined tables.
+
+Step 6 — Refresh the materialized view regularly
+
+Since it’s a demo, you can refresh weekly or whenever data changes:
+
+REFRESH MATERIALIZED VIEW company_search;
