@@ -1,766 +1,979 @@
-Perfect — let’s summarize a clean, step-by-step workflow to get your backend running from scratch, considering everything we discussed: FastAPI + raw SQL + Postgres + Redis + Alembic + asyncpg connection pool + caching.
+# FastAPI Production-Ready Deployment Guide
 
-Step 0 — Install dependencies
-pip install fastapi uvicorn asyncpg alembic aioredis
+## Phase 1: Project Setup & Environment
 
-
-fastapi → backend framework
-
-asyncpg → async Postgres client for raw SQL
-
-alembic → database migrations
-
-aioredis → Redis caching
-
-Step 1 — Project structure
+### Step 1 - Initialize Project Structure
+```
 my_demo_app/
-├─ alembic/                # Alembic migrations
-│  ├─ env.py
-│  └─ versions/
-├─ app/
-│  ├─ main.py              # FastAPI entrypoint
-│  ├─ db.py                # Postgres pool
-│  ├─ redis_cache.py       # Redis helper
-│  └─ queries.py           # Raw SQL queries
-├─ alembic.ini
-├─ requirements.txt
+├── .env.example
+├── .gitignore
+├── .pre-commit-config.yaml
+├── Makefile
+├── README.md
+├── requirements.txt
+├── requirements-dev.txt
+├── docker-compose.yml
+├── Dockerfile
+├── alembic.ini
+├── alembic/
+│   ├── env.py
+│   └── versions/
+├── app/
+│   ├── __init__.py
+│   ├── main.py                 # FastAPI app
+│   ├── config.py               # Settings & environment
+│   ├── database/
+│   │   ├── __init__.py
+│   │   ├── connection.py       # DB pool
+│   │   └── queries.py          # Raw SQL queries
+│   ├── cache/
+│   │   ├── __init__.py
+│   │   └── redis_client.py     # Redis operations
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── v1/
+│   │   │   ├── __init__.py
+│   │   │   ├── endpoints/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── products.py
+│   │   │   │   ├── communes.py
+│   │   │   │   ├── companies.py
+│   │   │   │   └── health.py
+│   │   │   └── router.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── requests.py         # Pydantic request models
+│   │   ├── responses.py        # Pydantic response models
+│   │   └── errors.py           # Error models
+│   ├── middleware/
+│   │   ├── __init__.py
+│   │   ├── cors.py
+│   │   ├── logging.py
+│   │   └── security.py
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   ├── content_moderation.py
+│   │   ├── security.py
+│   │   └── validators.py
+│   └── tests/
+│       ├── __init__.py
+│       ├── conftest.py
+│       ├── test_endpoints.py
+│       ├── test_database.py
+│       └── test_cache.py
+└── scripts/
+    ├── setup.sh
+    ├── migrate.sh
+    └── deploy.sh
+```
 
-Step 2 — Postgres connection pool
-# app/db.py
+### Step 2 - Install Dependencies
+```bash
+# requirements.txt
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+gunicorn==21.2.0
+asyncpg==0.29.0
+alembic==1.12.1
+aioredis==2.0.1
+pydantic[email]==2.5.0
+pydantic-settings==2.1.0
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+better-profanity==0.7.0
+python-magic==0.4.27
+structlog==23.2.0
+
+# requirements-dev.txt
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+black==23.11.0
+isort==5.12.0
+flake8==6.1.0
+mypy==1.7.1
+pre-commit==3.5.0
+locust==2.17.0
+```
+
+### Step 3 - Environment Configuration
+```python
+# app/config.py
+from pydantic_settings import BaseSettings
+from typing import Optional
+
+class Settings(BaseSettings):
+    # Database
+    database_url: str
+    db_pool_min_size: int = 5
+    db_pool_max_size: int = 20
+    db_timeout: int = 30
+    
+    # Redis
+    redis_url: str
+    redis_timeout: int = 5
+    cache_ttl: int = 3600
+    
+    # Security
+    secret_key: str
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
+    
+    # Content Moderation
+    enable_content_moderation: bool = True
+    max_file_size: int = 10_000_000  # 10MB
+    allowed_file_types: list[str] = ["image/jpeg", "image/png", "image/webp"]
+    
+    # API
+    api_v1_prefix: str = "/api/v1"
+    project_name: str = "Demo API"
+    debug: bool = False
+    
+    # CORS
+    allowed_origins: list[str] = ["http://localhost:3000"]
+    
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+```
+
+## Phase 2: Database & Migrations
+
+### Step 4 - Database Connection with Pooling
+```python
+# app/database/connection.py
 import asyncpg
+import structlog
+from typing import AsyncGenerator
+from app.config import settings
 
-DATABASE_URL = "postgresql://user:password@localhost:5432/mydb"
+logger = structlog.get_logger()
 pool: asyncpg.Pool = None
 
 async def init_db_pool():
     global pool
-    pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=5, max_size=10)
+    try:
+        pool = await asyncpg.create_pool(
+            dsn=settings.database_url,
+            min_size=settings.db_pool_min_size,
+            max_size=settings.db_pool_max_size,
+            command_timeout=settings.db_timeout,
+        )
+        logger.info("Database pool initialized")
+    except Exception as e:
+        logger.error("Failed to initialize database pool", error=str(e))
+        raise
 
-async def get_db():
+async def close_db_pool():
+    global pool
+    if pool:
+        await pool.close()
+        logger.info("Database pool closed")
+
+async def get_db() -> AsyncGenerator[asyncpg.Connection, None]:
     async with pool.acquire() as conn:
-        yield conn
+        try:
+            async with conn.transaction():
+                yield conn
+        except Exception as e:
+            logger.error("Database transaction failed", error=str(e))
+            raise
+```
 
-
-Initialize the pool at FastAPI startup:
-
-# app/main.py
-from fastapi import FastAPI
-from db import init_db_pool
-
-app = FastAPI()
-
-@app.on_event("startup")
-async def startup():
-    await init_db_pool()
-
-Step 3 — Redis helper
-# app/redis_cache.py
-import aioredis, json
-
-redis = aioredis.from_url("redis://localhost", encoding="utf-8", decode_responses=True)
-
-async def get_or_set_cache(key: str, query_func, ttl=3600):
-    cached = await redis.get(key)
-    if cached:
-        return json.loads(cached)
-    result = await query_func()
-    await redis.set(key, json.dumps(result), ex=ttl)
-    return result
-
-Step 4 — Alembic migrations (raw SQL)
-
-Initialize Alembic:
-
-alembic init alembic
-
-
-Write your first migration alembic/versions/xxxx_initial_tables.py:
-
+### Step 5 - Alembic Migration with Constraints & Indexes
+```python
+# alembic/versions/001_initial_tables.py
 from alembic import op
+import sqlalchemy as sa
 
-revision = 'initial'
+revision = '001_initial'
 down_revision = None
-branch_labels = None
-depends_on = None
 
 def upgrade():
+    # Products table
     op.execute("""
         CREATE TABLE products (
             uuid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            name_es TEXT NOT NULL,
-            name_en TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            name_es TEXT NOT NULL CHECK (char_length(name_es) > 0),
+            name_en TEXT NOT NULL CHECK (char_length(name_en) > 0),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            deleted_at TIMESTAMPTZ NULL
         );
+        
+        CREATE INDEX idx_products_name_es ON products(name_es) WHERE deleted_at IS NULL;
+        CREATE INDEX idx_products_created_at ON products(created_at) WHERE deleted_at IS NULL;
     """)
+    
+    # Communes table
     op.execute("""
         CREATE TABLE communes (
             uuid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            name TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            name TEXT NOT NULL UNIQUE CHECK (char_length(name) > 0),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            deleted_at TIMESTAMPTZ NULL
         );
+        
+        CREATE INDEX idx_communes_name ON communes(name) WHERE deleted_at IS NULL;
     """)
+    
+    # Companies table
     op.execute("""
         CREATE TABLE companies (
             uuid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             user_uuid UUID NOT NULL,
             product_uuid UUID NOT NULL,
             commune_uuid UUID NOT NULL,
-            name TEXT NOT NULL,
-            description_es TEXT,
-            description_en TEXT,
-            address TEXT,
-            phone TEXT,
-            email TEXT,
+            name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 255),
+            description_es TEXT CHECK (char_length(description_es) <= 2000),
+            description_en TEXT CHECK (char_length(description_en) <= 2000),
+            address TEXT CHECK (char_length(address) <= 500),
+            phone TEXT CHECK (phone ~ '^[0-9+\-\s()]+$'),
+            email TEXT CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'),
             image_url TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            deleted_at TIMESTAMPTZ NULL,
+            
+            FOREIGN KEY (product_uuid) REFERENCES products(uuid),
+            FOREIGN KEY (commune_uuid) REFERENCES communes(uuid)
         );
+        
+        CREATE INDEX idx_companies_product_uuid ON companies(product_uuid) WHERE deleted_at IS NULL;
+        CREATE INDEX idx_companies_commune_uuid ON companies(commune_uuid) WHERE deleted_at IS NULL;
+        CREATE INDEX idx_companies_created_at ON companies(created_at) WHERE deleted_at IS NULL;
+        CREATE INDEX idx_companies_name ON companies USING gin(to_tsvector('spanish', name)) WHERE deleted_at IS NULL;
     """)
 
 def downgrade():
     op.execute("DROP TABLE IF EXISTS companies CASCADE;")
-    op.execute("DROP TABLE IF EXISTS products CASCADE;")
+    op.execute("DROP TABLE IF EXISTS products CASCADE;") 
     op.execute("DROP TABLE IF EXISTS communes CASCADE;")
-
-
-Apply migration:
-
-alembic upgrade head
-
-Step 5 — Raw SQL queries
-# app/queries.py
-async def fetch_products(db):
-    rows = await db.fetch("SELECT uuid, name_es, name_en FROM products ORDER BY name_es;")
-    return [dict(row) for row in rows]
-
-async def fetch_communes(db):
-    rows = await db.fetch("SELECT uuid, name FROM communes ORDER BY name;")
-    return [dict(row) for row in rows]
-
-async def fetch_companies(db, page=1, page_size=10):
-    offset = (page-1)*page_size
-    rows = await db.fetch("""
-        SELECT uuid, name, description_es, description_en, created_at
-        FROM companies
-        ORDER BY created_at DESC
-        LIMIT $1 OFFSET $2;
-    """, page_size, offset)
-    return [dict(row) for row in rows]
-
-Step 6 — FastAPI endpoints
-# app/main.py (continued)
-from fastapi import Depends
-from db import get_db
-from redis_cache import get_or_set_cache
-from queries import fetch_products, fetch_communes, fetch_companies
-
-@app.get("/products")
-async def products(db=Depends(get_db)):
-    return await get_or_set_cache("products_all", lambda: fetch_products(db))
-
-@app.get("/communes")
-async def communes(db=Depends(get_db)):
-    return await get_or_set_cache("communes_all", lambda: fetch_communes(db))
-
-@app.get("/companies")
-async def companies(page: int = 1, page_size: int = 10, db=Depends(get_db)):
-    return await fetch_companies(db, page, page_size)
-
-Step 7 — Run the backend
-uvicorn app.main:app --reload
-
-
-/products → cached dropdown
-
-/communes → cached dropdown
-
-/companies → live paginated query
-
-✅ Summary of workflow
-
-Install dependencies.
-
-Create project structure.
-
-Set up Postgres connection pool with asyncpg.
-
-Configure Redis caching.
-
-Use Alembic migrations with raw SQL to create tables.
-
-Write raw SQL queries in queries.py.
-
-Expose FastAPI endpoints, use Redis for static dropdowns.
-
-Run FastAPI — backend fully functional.
-
-If you want, I can now add cache invalidation logic for products and communes — so that when you insert/update/delete rows, the Redis cache is automatically refreshed. This is realistic and looks very professional for a demo.
-
-Do you want me to do that?
-
-You said:
-i dont see sql injection protecion, os protection, uvicorn and guvicorn workers for implementation, do you a have a list of considerations to have in consideration to do not fuck up and look like a llm copy cat piece shit person for my fastapi backend?
-ChatGPT said:
-
-Ah, now we’re talking interview/demo hygiene — what makes a backend look professional versus “copy-paste from the Internet.” Since you’re doing FastAPI + raw SQL + Redis + Postgres, here’s a detailed checklist of considerations and best practices. I’ll separate them into security, deployment, performance, and code hygiene so you don’t get burned.
-
-1️⃣ SQL Injection / Query Safety
-
-Always use parameterized queries with $1, $2 style in asyncpg instead of string interpolation:
-
-# Good
-await db.fetch("SELECT * FROM products WHERE name_es = $1", search_term)
-
-# Bad
-await db.fetch(f"SELECT * FROM products WHERE name_es = '{search_term}'")  # vulnerable
-
-
-Never interpolate user input directly into raw SQL.
-
-For multiple optional filters, build queries carefully or use libraries like sqlbuilder or psycopg2.sql if needed.
-
-2️⃣ OS / Environment Protection
-
-Do not hardcode secrets (DB password, Redis password) in code. Use environment variables:
-
-export DATABASE_URL="postgresql://user:password@localhost:5432/mydb"
-export REDIS_URL="redis://localhost"
-
-
-Load them in Python with os.environ.get().
-
-Limit permissions: Postgres user should only have access to the demo schema.
-
-If running on Linux, avoid running FastAPI as root.
-
-3️⃣ Deployment / Uvicorn / Gunicorn Workers
-
-Uvicorn is a lightweight async server — fine for dev.
-
-For production-like demo, use Gunicorn with Uvicorn workers:
-
-gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker
-
-
--w 4 → 4 workers for concurrency (demo-level, enough for interviews)
-
--k uvicorn.workers.UvicornWorker → async FastAPI support
-
-Optional: Use --bind 0.0.0.0:8000 to expose externally in demo VM/docker.
-
-4️⃣ Redis / Cache Considerations
-
-Use TTL (time-to-live) for cached dropdowns.
-
-Invalidate cache on updates/inserts/deletes:
-
-await redis.delete("products_all")
-await redis.delete("communes_all")
-
-
-Don’t cache sensitive data (like passwords).
-
-5️⃣ Security / Authentication / Passwords
-
-Never store plain passwords → always hash (bcrypt or argon2).
-
-For demo-level authentication, JWT tokens are sufficient.
-
-Rate-limit endpoints if possible (even a simple fastapi-limiter) to prevent spammy demo requests.
-
-6️⃣ Logging / Error Handling
-
-Log errors and queries for debugging:
-
-import logging
-logging.basicConfig(level=logging.INFO)
-
-
-Wrap database queries in try/except to avoid crashing on bad input.
-
-Don’t leak internal exceptions to the client — return sanitized error messages.
-
-7️⃣ Pagination / Query Limits
-
-Always paginate companies or large datasets to avoid loading everything.
-
-Set reasonable max page size (e.g., 50 or 100) to avoid DoS.
-
-8️⃣ Async Best Practices
-
-Use connection pools for Postgres (asyncpg.create_pool).
-
-Redis → use async (aioredis) for non-blocking I/O.
-
-Avoid await inside loops for multiple queries; batch them if possible.
-
-9️⃣ Migrations / Schema Management
-
-Alembic for version control — don’t manually create tables in the DB.
-
-Keep migrations idempotent (use IF NOT EXISTS if needed).
-
-Apply migrations before starting the app.
-
-🔟 Demo-level extra polish
-
-Dockerize your backend → show you know containers.
-
-Include .env.example → makes demo reproducible.
-
-Use typed responses in FastAPI (pydantic models) for endpoints.
-
-Add CORS if frontend demo is on another port:
-
-from fastapi.middleware.cors import CORSMiddleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # demo only
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-✅ Quick Checklist
-Area	Recommendation
-SQL Injection	Always parameterized queries
-Secrets	Use env variables, no hardcoding
-Deployment	Gunicorn + Uvicorn workers
-Cache	TTL + invalidate on updates
-Passwords	Hash with bcrypt/argon2
-Pagination	Always limit + offset
-Async	Connection pool + async Redis
-Migrations	Alembic raw SQL, versioned
-Logging	Info level + error handling
-CORS	For demo frontend access
-
-If you want, I can rewrite your previous backend steps with all these considerations integrated, including:
-
-Asyncpg connection pool
-
-Redis caching with TTL + invalidation
-
-Gunicorn/Uvicorn ready startup command
-
-Parameterized queries
-
-Environment variable secrets
-
-That way your demo backend is safe, professional, and interview-ready.
-
-Do you want me to do that?
-
-You said:
-testing is missing, something else you can think of?
-ChatGPT said:
-
-Absolutely — testing is critical, especially if you want your demo/backend to look professional. Since this is a FastAPI + Postgres + Redis + raw SQL setup, here’s what else you should consider for completeness beyond the previous checklist:
-
-1️⃣ Automated Testing
-
-Unit tests: Test your raw SQL queries and any small logic functions.
-
-Integration tests: Test endpoints, ideally using a test database (Postgres in Docker or in-memory if possible).
-
-Tools:
-
-pytest → main testing framework
-
-httpx → async HTTP client for testing FastAPI endpoints
-
-pytest-asyncio → async tests
-
-Example: test /products endpoint
-
-import pytest
-from httpx import AsyncClient
-from app.main import app
-
-@pytest.mark.asyncio
-async def test_products_endpoint():
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.get("/products")
-        assert response.status_code == 200
-        assert isinstance(response.json(), list)
-
-2️⃣ Test Database / Transaction Rollback
-
-For integration tests, use a separate test database.
-
-Wrap tests in transactions and roll back after each test to avoid polluting the DB:
-
-@pytest.fixture
-async def db_conn():
-    conn = await asyncpg.connect("postgresql://testuser:testpass@localhost:5432/testdb")
-    async with conn.transaction():
-        yield conn
-    await conn.close()
-
-3️⃣ Cache Testing
-
-Ensure Redis caching works as intended:
-
-Test that repeated calls hit cache.
-
-Test TTL expiration.
-
-Test invalidation after updates.
-
-4️⃣ Security Testing
-
-Check SQL injection attempts: pass strings like ' OR 1=1 -- in parameters and ensure nothing breaks.
-
-Check that sensitive fields (hashed_password) are never returned in endpoints.
-
-Optionally, use a tool like bandit for Python security linting.
-
-5️⃣ Load / Performance Testing (Optional for Demo)
-
-Simulate multiple users hitting endpoints to show your pooled connections + caching work.
-
-Tools: locust or hey.
-
-6️⃣ Other considerations
-
-Data validation: Ensure Pydantic models validate incoming data in endpoints.
-
-Timeouts: Set reasonable query/connection timeouts in asyncpg and Redis.
-
-Error handling: Return proper HTTP codes, e.g., 404 for not found, 422 for validation errors.
-
-Documentation: FastAPI auto-generates /docs, so make sure your endpoints and models are clear.
-
-Logging / monitoring: Even simple logging.info() or logging.error() helps.
-
-✅ Updated “Extra Professional Demo” Checklist
-Area	Recommendation
-Testing	Unit, integration, cache, security, load
-Database	Test DB for CI / test isolation
-Cache	TTL + invalidation tested
-Security	SQL injection, sensitive field exposure, bandit
-Async / Pool	Ensure connection pool handles concurrent requests
-Validation	Pydantic + proper error codes
-Logging	Info + error logging, query logging optional
-Documentation	FastAPI /docs clean
-
-If you want, I can draft a full “interview-ready backend” template that includes:
-
-FastAPI endpoints
-
-Asyncpg connection pool
-
-Redis caching with TTL + invalidation
-
-Alembic migrations (raw SQL)
-
-Parameterized queries
-
-Basic tests for endpoints, cache, and SQL safety
-
-…basically a complete demo-ready backend that looks professional and won’t get called “copy-paste LLM code.”
-
-Pydantic Models
-
-Why: FastAPI heavily relies on Pydantic for data validation and serialization.
-
-All request bodies, query parameters, and responses should use Pydantic models to avoid bad input and ensure consistent output.
-
-Example:
-
+```
+
+## Phase 3: Redis Cache with TTL & Invalidation
+
+### Step 6 - Redis Client
+```python
+# app/cache/redis_client.py
+import aioredis
+import json
+import structlog
+from typing import Any, Optional, Callable
+from app.config import settings
+
+logger = structlog.get_logger()
+redis: aioredis.Redis = None
+
+async def init_redis():
+    global redis
+    try:
+        redis = aioredis.from_url(
+            settings.redis_url, 
+            encoding="utf-8", 
+            decode_responses=True,
+            socket_timeout=settings.redis_timeout
+        )
+        await redis.ping()
+        logger.info("Redis connection initialized")
+    except Exception as e:
+        logger.error("Failed to initialize Redis", error=str(e))
+        raise
+
+async def close_redis():
+    global redis
+    if redis:
+        await redis.close()
+        logger.info("Redis connection closed")
+
+async def get_or_set_cache(
+    key: str, 
+    query_func: Callable, 
+    ttl: int = settings.cache_ttl,
+    *args, **kwargs
+) -> Any:
+    try:
+        cached = await redis.get(key)
+        if cached:
+            logger.debug("Cache hit", key=key)
+            return json.loads(cached)
+        
+        logger.debug("Cache miss", key=key)
+        result = await query_func(*args, **kwargs)
+        await redis.set(key, json.dumps(result, default=str), ex=ttl)
+        return result
+    except Exception as e:
+        logger.error("Cache operation failed", key=key, error=str(e))
+        # Fallback to direct query
+        return await query_func(*args, **kwargs)
+
+async def invalidate_cache(*keys: str):
+    try:
+        if keys:
+            await redis.delete(*keys)
+            logger.info("Cache invalidated", keys=keys)
+    except Exception as e:
+        logger.error("Cache invalidation failed", keys=keys, error=str(e))
+```
+
+## Phase 4: Pydantic Models & Error Handling
+
+### Step 7 - Response Models
+```python
+# app/models/responses.py
 from pydantic import BaseModel, EmailStr
+from typing import Optional, List
 from uuid import UUID
-from typing import Optional
+from datetime import datetime
 
 class ProductOut(BaseModel):
     uuid: UUID
     name_es: str
     name_en: str
+    created_at: datetime
+
+class CommuneOut(BaseModel):
+    uuid: UUID
+    name: str
+    created_at: datetime
 
 class CompanyOut(BaseModel):
     uuid: UUID
     name: str
     description_es: Optional[str]
     description_en: Optional[str]
-
-
-Benefits:
-
-Automatic validation of input types
-
-Auto-generation of API docs (/docs)
-
-Safer JSON serialization
-
-2️⃣ Cookies / Session Handling
-
-Instead of storing state in the frontend’s localStorage, you can use HTTP cookies or JWTs in cookies:
-
-Session cookies: store a session token on the server (Redis or DB).
-
-JWT cookies: store a signed JWT in a cookie for stateless authentication.
-
-Example (FastAPI):
-
-from fastapi import Response
-
-@app.post("/login")
-async def login(response: Response):
-    token = "jwt-or-session-token"
-    response.set_cookie(key="session", value=token, httponly=True, secure=True)
-    return {"message": "Logged in"}
-
-
-Benefits:
-
-Frontend doesn’t need to handle localStorage manually
-
-httponly cookies mitigate XSS
-
-Easy to transition between multiple clients (browser, mobile)
-
-3️⃣ Missing Considerations / Polish
-Area	Recommendation
-Pydantic	Validate request/response bodies, query params, auto-docs
-Cookies / Sessions	Store auth tokens securely, prefer HttpOnly cookies
-CORS	Only allow frontend origins you control, even for demo
-Environment & Secrets	.env file, avoid hardcoding DB/Redis passwords
-Logging	Structured logging + error reporting
-Testing	Unit + integration + cache + SQL injection + security
-Rate Limiting	Optional, but prevents accidental DoS during demo
-Migration Strategy	Alembic raw SQL with version control
-Async / Pool	Connection pooling for Postgres and Redis
-Cache Invalidation	On updates/inserts/deletes
-Pagination	Always limit large datasets like companies
-4️⃣ Optional “Extra Professional Touches”
-
-Response Models for all endpoints → ensures frontend doesn’t get unexpected fields.
-
-Dependency Injection for auth → clean, testable authentication system.
-
-Consistent naming → avoid mixing snake_case / camelCase.
-
-Dockerize backend + Redis + Postgres → fully reproducible demo environment.
-
-Basic metrics → even simple Prometheus metrics or /health endpoint shows professionalism.
-
-If you want, I can rewrite your entire demo backend plan to include everything:
-
-FastAPI endpoints with Pydantic
-
-Asyncpg + connection pool
-
-Redis caching + invalidation
-
-Parameterized raw SQL
-
-Cookie-based authentication
-
-Pagination for large datasets
-
-Alembic raw SQL migrations
-
-Basic unit & integration tests
-
-nginx but thats for the future
-ChatGPT said:
-
-Exactly — Nginx isn’t necessary for your demo right now, but it’s something to keep in mind for a production-ready setup. Here’s why and what role it would play in the future:
-
-1️⃣ Why Nginx?
-
-Reverse proxy: Handles incoming HTTP requests and forwards them to your FastAPI app running via Uvicorn/Gunicorn.
-
-SSL termination: Lets you serve HTTPS without changing your FastAPI code.
-
-Load balancing: If you spin up multiple FastAPI instances, Nginx can distribute requests across them.
-
-Static file serving: If your frontend is served from the same server, Nginx can efficiently serve CSS, JS, images.
-
-Security / headers: You can add HSTS, CSP, and rate-limiting headers at the proxy level.
-
-2️⃣ When to add Nginx
-
-Only when you move from demo → production or want to show a “full-stack deployment pipeline.”
-
-For your interview/demo backend, you can run Gunicorn/Uvicorn directly.
-
-3️⃣ Minimal production deployment plan (future)
-
-Gunicorn + Uvicorn workers running FastAPI
-
-Redis for caching
-
-Postgres for storage
-
-Nginx as reverse proxy + SSL + optional load balancing
-
-Optional Docker Compose for all services
-
-Ah yes — now we’re talking making your demo backend look “safe and professional”. Even if it’s a small demo, having some automated content moderation shows foresight. Here’s a structured way to handle it without breaking the bank:
-
-1️⃣ Image Moderation (Inappropriate Content)
-Free / open-source options:
-
-OpenNSFW / Yahoo’s model
-
-Pretrained deep learning model for NSFW content detection.
-
-Can run locally on CPU/GPU.
-
-Input: image → Output: probability NSFW / SFW.
-
-Hugging Face models
-
-E.g., openai/clip-vit-base-patch32 + NSFW classifiers.
-
-Free inference for small-scale demo.
-
-Integration into FastAPI
-from PIL import Image
-import nsfw_detector
-
-model = nsfw_detector.NSFWModel("model-path")
-
-@app.post("/upload_image")
-async def upload_image(file: UploadFile):
-    image = Image.open(file.file)
-    result = model.predict(image)
-    if result["porn"] > 0.5 or result["sexy"] > 0.5:
-        return {"error": "Image flagged as inappropriate"}
-    # Save image or return success
-    return {"message": "Image accepted"}
-
-
-Thresholds are configurable for “safe enough.”
-
-Works for demo-level traffic, no cloud API needed.
-
-2️⃣ Text Filtering (Bad Words)
-Simple approaches
-
-Profanity lists (Python packages like better_profanity or profanity-filter).
-
-Regex or word lists for your supported languages (Spanish + English).
-
-Example:
-
+    address: Optional[str]
+    phone: Optional[str]
+    email: Optional[EmailStr]
+    image_url: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+class PaginatedResponse(BaseModel):
+    items: List[CompanyOut]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+# app/models/errors.py
+class ErrorResponse(BaseModel):
+    error: str
+    details: Optional[str] = None
+    code: str
+    timestamp: datetime
+```
+
+### Step 8 - Raw SQL Queries with Parameters
+```python
+# app/database/queries.py
+import asyncpg
+import structlog
+from typing import List, Dict, Any
+
+logger = structlog.get_logger()
+
+async def fetch_products(db: asyncpg.Connection) -> List[Dict[str, Any]]:
+    query = """
+        SELECT uuid, name_es, name_en, created_at 
+        FROM products 
+        WHERE deleted_at IS NULL 
+        ORDER BY name_es
+    """
+    rows = await db.fetch(query)
+    return [dict(row) for row in rows]
+
+async def fetch_communes(db: asyncpg.Connection) -> List[Dict[str, Any]]:
+    query = """
+        SELECT uuid, name, created_at 
+        FROM communes 
+        WHERE deleted_at IS NULL 
+        ORDER BY name
+    """
+    rows = await db.fetch(query)
+    return [dict(row) for row in rows]
+
+async def fetch_companies_paginated(
+    db: asyncpg.Connection, 
+    page: int = 1, 
+    page_size: int = 10,
+    product_uuid: str = None,
+    commune_uuid: str = None,
+    search: str = None
+) -> Dict[str, Any]:
+    offset = (page - 1) * page_size
+    
+    # Build WHERE conditions
+    conditions = ["deleted_at IS NULL"]
+    params = []
+    param_count = 0
+    
+    if product_uuid:
+        param_count += 1
+        conditions.append(f"product_uuid = ${param_count}")
+        params.append(product_uuid)
+    
+    if commune_uuid:
+        param_count += 1
+        conditions.append(f"commune_uuid = ${param_count}")
+        params.append(commune_uuid)
+    
+    if search:
+        param_count += 1
+        conditions.append(f"name ILIKE ${param_count}")
+        params.append(f"%{search}%")
+    
+    where_clause = " AND ".join(conditions)
+    
+    # Count query
+    count_query = f"SELECT COUNT(*) FROM companies WHERE {where_clause}"
+    total = await db.fetchval(count_query, *params)
+    
+    # Data query
+    param_count += 1
+    limit_param = param_count
+    param_count += 1
+    offset_param = param_count
+    
+    data_query = f"""
+        SELECT uuid, name, description_es, description_en, 
+               address, phone, email, image_url, created_at, updated_at
+        FROM companies 
+        WHERE {where_clause}
+        ORDER BY created_at DESC 
+        LIMIT ${limit_param} OFFSET ${offset_param}
+    """
+    
+    params.extend([page_size, offset])
+    rows = await db.fetch(data_query, *params)
+    
+    return {
+        "items": [dict(row) for row in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size
+    }
+```
+
+## Phase 5: Security & Content Moderation
+
+### Step 9 - Content Moderation
+```python
+# app/utils/content_moderation.py
 from better_profanity import profanity
+import magic
+import structlog
+from typing import Optional
 
+logger = structlog.get_logger()
+
+# Load profanity filter
 profanity.load_censor_words()
-text = "some user input"
-if profanity.contains_profanity(text):
-    return {"error": "Text contains inappropriate words"}
 
+class ContentModerator:
+    def __init__(self):
+        self.allowed_mime_types = {
+            "image/jpeg", "image/png", "image/webp"
+        }
+    
+    def check_text_content(self, text: str) -> tuple[bool, Optional[str]]:
+        if not text:
+            return True, None
+        
+        # Check for profanity
+        if profanity.contains_profanity(text):
+            return False, "Text contains inappropriate content"
+        
+        # Check for HTML/XSS attempts
+        dangerous_patterns = ["<script", "javascript:", "on\w+="]
+        text_lower = text.lower()
+        for pattern in dangerous_patterns:
+            if pattern in text_lower:
+                return False, "Text contains potentially harmful content"
+        
+        return True, None
+    
+    def check_file_upload(self, file_content: bytes, filename: str) -> tuple[bool, Optional[str]]:
+        # Check file size
+        if len(file_content) > 10 * 1024 * 1024:  # 10MB
+            return False, "File size exceeds limit"
+        
+        # Check MIME type using magic bytes
+        try:
+            mime_type = magic.from_buffer(file_content, mime=True)
+            if mime_type not in self.allowed_mime_types:
+                return False, f"File type {mime_type} not allowed"
+        except Exception as e:
+            logger.error("MIME type detection failed", error=str(e))
+            return False, "Unable to verify file type"
+        
+        return True, None
 
-Can combine custom word lists for your domain.
+moderator = ContentModerator()
+```
 
-Works offline, free, fast.
+## Phase 6: FastAPI Application & Middleware
 
-3️⃣ Integration into your backend workflow
+### Step 10 - Middleware Setup
+```python
+# app/middleware/logging.py
+import structlog
+import time
+import uuid
+from fastapi import Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 
-Companies table → description fields → check text for bad words before insert/update.
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Generate correlation ID
+        correlation_id = str(uuid.uuid4())
+        request.state.correlation_id = correlation_id
+        
+        # Log request
+        logger = structlog.get_logger()
+        start_time = time.time()
+        
+        logger.info(
+            "Request started",
+            correlation_id=correlation_id,
+            method=request.method,
+            url=str(request.url),
+            client_ip=request.client.host if request.client else None
+        )
+        
+        # Process request
+        response = await call_next(request)
+        
+        # Log response
+        duration = time.time() - start_time
+        logger.info(
+            "Request completed",
+            correlation_id=correlation_id,
+            status_code=response.status_code,
+            duration_ms=round(duration * 1000, 2)
+        )
+        
+        response.headers["X-Correlation-ID"] = correlation_id
+        return response
 
-Images → image upload endpoint → check for NSFW content before saving.
+# app/middleware/security.py
+from fastapi import Request, HTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
 
-Combine with Redis caching if you want to store “flagged” results temporarily.
+class SecurityMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Request size limit
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > 10 * 1024 * 1024:  # 10MB
+            raise HTTPException(413, "Request too large")
+        
+        response = await call_next(request)
+        
+        # Security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        
+        return response
+```
 
-4️⃣ Optional / Advanced
+### Step 11 - API Endpoints
+```python
+# app/api/v1/endpoints/health.py
+from fastapi import APIRouter, HTTPException, Depends
+from app.database.connection import get_db
+from app.cache.redis_client import redis
+import asyncpg
 
-Hugging Face Transformers for more nuanced text classification:
+router = APIRouter()
 
-Can detect hate speech, adult content, or spam.
+@router.get("/health")
+async def health_check(db: asyncpg.Connection = Depends(get_db)):
+    try:
+        # Test database
+        await db.fetchval("SELECT 1")
+        
+        # Test Redis
+        await redis.ping()
+        
+        return {
+            "status": "healthy",
+            "services": {
+                "database": "ok",
+                "redis": "ok"
+            }
+        }
+    except Exception as e:
+        raise HTTPException(503, f"Service unhealthy: {str(e)}")
 
-Free to run locally for demo.
+# app/api/v1/endpoints/products.py
+from fastapi import APIRouter, Depends, HTTPException
+from typing import List
+import asyncpg
+from app.database.connection import get_db
+from app.database.queries import fetch_products
+from app.cache.redis_client import get_or_set_cache
+from app.models.responses import ProductOut
 
-Clip Interrogator / OpenCLIP for image + text moderation if you want multimodal filtering.
+router = APIRouter()
 
-✅ TL;DR / Practical Plan for Demo
+@router.get("/products", response_model=List[ProductOut])
+async def get_products(db: asyncpg.Connection = Depends(get_db)):
+    try:
+        return await get_or_set_cache(
+            "products_all", 
+            fetch_products,
+            db=db
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Failed to fetch products: {str(e)}")
+```
 
-Text moderation: better_profanity + custom word list → block bad words in descriptions.
+### Step 12 - Main Application
+```python
+# app/main.py
+import structlog
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from contextlib import asynccontextmanager
 
-Image moderation: OpenNSFW / Hugging Face NSFW model → block inappropriate images.
+from app.config import settings
+from app.database.connection import init_db_pool, close_db_pool
+from app.cache.redis_client import init_redis, close_redis
+from app.middleware.logging import LoggingMiddleware
+from app.middleware.security import SecurityMiddleware
+from app.api.v1.router import api_router
 
-Integration: Validate before DB insert → store only safe content.
+# Configure structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.JSONRenderer()
+    ],
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
+)
 
-Performance: Run locally, async if possible, no paid API required.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await init_db_pool()
+    await init_redis()
+    yield
+    # Shutdown
+    await close_db_pool()
+    await close_redis()
 
-If you want, I can sketch a full flow for your backend, showing:
+app = FastAPI(
+    title=settings.project_name,
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.debug else None,
+    redoc_url="/redoc" if settings.debug else None
+)
 
-Product / company creation
+# Middleware
+app.add_middleware(SecurityMiddleware)
+app.add_middleware(LoggingMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(
+    TrustedHostMiddleware, 
+    allowed_hosts=["localhost", "127.0.0.1", "*.yourdomain.com"]
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["*"],
+)
 
-Redis caching
+# Routes
+app.include_router(api_router, prefix=settings.api_v1_prefix)
 
-Raw SQL + FastAPI
+@app.get("/")
+async def root():
+    return {"message": "API is running", "version": "1.0.0"}
+```
 
-Text + image moderation integrated
+## Phase 7: Testing
 
-1️⃣ Security & Hardening
+### Step 13 - Test Configuration
+```python
+# app/tests/conftest.py
+import pytest
+import asyncio
+from httpx import AsyncClient
+from app.main import app
 
-SQL Injection: Always parameterized queries (you already mentioned this).
+@pytest.fixture(scope="session")
+def event_loop():
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
 
-Secrets: Environment variables for DB, Redis, and any ML models.
+@pytest.fixture
+async def client():
+    async with AsyncClient(app=app, base_url="http://test") as ac:
+        yield ac
 
-HTTPS / TLS: For future Nginx deployment.
+# app/tests/test_endpoints.py
+import pytest
+from httpx import AsyncClient
 
-CORS: Restrict to frontend origin even for demo (don’t use "*" in production).
+@pytest.mark.asyncio
+async def test_health_endpoint(client: AsyncClient):
+    response = await client.get("/api/v1/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
 
-Rate limiting: Optional, but prevents accidental DoS in demo.
+@pytest.mark.asyncio
+async def test_products_endpoint(client: AsyncClient):
+    response = await client.get("/api/v1/products")
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
 
-2️⃣ Validation & Serialization
+@pytest.mark.asyncio
+async def test_request_size_limit(client: AsyncClient):
+    large_data = {"data": "x" * (11 * 1024 * 1024)}  # 11MB
+    response = await client.post("/api/v1/companies", json=large_data)
+    assert response.status_code == 413
+```
 
-Pydantic models for all request/response bodies.
+## Phase 8: Development Tools
 
-Ensure email, UUID, text length, etc., are validated.
+### Step 14 - Pre-commit Hooks
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/psf/black
+    rev: 23.11.0
+    hooks:
+      - id: black
+  - repo: https://github.com/pycqa/isort
+    rev: 5.12.0
+    hooks:
+      - id: isort
+  - repo: https://github.com/pycqa/flake8
+    rev: 6.1.0
+    hooks:
+      - id: flake8
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.7.1
+    hooks:
+      - id: mypy
+```
 
-Helps your /docs look clean.
+### Step 15 - Makefile
+```makefile
+# Makefile
+.PHONY: install dev test lint format migrate run docker-build docker-run
 
-3️⃣ Async & Pooling Best Practices
+install:
+	pip install -r requirements.txt
 
-Asyncpg connection pool with sensible min_size / max_size.
+dev:
+	pip install -r requirements-dev.txt
+	pre-commit install
 
-Redis async calls with proper TTL.
+test:
+	pytest app/tests/ -v
 
-Batch queries when possible to avoid N+1 problems.
+lint:
+	flake8 app/
+	mypy app/
 
-4️⃣ Testing
+format:
+	black app/
+	isort app/
 
-Unit tests for SQL queries.
+migrate:
+	alembic upgrade head
 
-Integration tests for endpoints (httpx + pytest-asyncio).
+run-dev:
+	uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-Cache tests: TTL + invalidation.
+run-prod:
+	gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 
-Security tests: SQL injection, bad words, NSFW images.
+docker-build:
+	docker build -t my-demo-app .
 
-Optional: small load test with locust to show pooling + cache works.
+docker-run:
+	docker-compose up -d
+```
 
-5️⃣ Logging & Error Handling
+## Phase 9: Dockerization
 
-Structured logging.info() and logging.error().
+### Step 16 - Dockerfile
+```dockerfile
+# Dockerfile
+FROM python:3.11-slim
 
-Wrap queries in try/except, sanitize error messages returned to client.
+WORKDIR /app
 
-Optional: metrics endpoint /health or /metrics.
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    libmagic1 \
+    && rm -rf /var/lib/apt/lists/*
 
-6️⃣ Pagination / Limits
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-Already paginated companies — consider max page size (50–100) to avoid overload.
+# Copy application
+COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini .
 
-7️⃣ Content Moderation
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash appuser
+RUN chown -R appuser:appuser /app
+USER appuser
 
-Text: better_profanity + custom word list (English + Spanish).
+EXPOSE 8000
 
-Images: OpenNSFW / Hugging Face models, integrated before DB insert.
+CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
+```
 
-Optional: cache flagged content temporarily in Redis.
+### Step 17 - Docker Compose
+```yaml
+# docker-compose.yml
+version: '3.8'
 
-8️⃣ Optional Polish / Demo Extras
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://demo:demo123@postgres:5432/demo_db
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-Docker Compose for backend + Redis + Postgres.
+  postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=demo
+      - POSTGRES_PASSWORD=demo123
+      - POSTGRES_DB=demo_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
-Alembic migrations fully versioned.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
 
-Gunicorn + Uvicorn workers ready for multi-core demonstration.
+volumes:
+  postgres_data:
+  redis_data:
+```
 
-Cookie-based JWT session for auth instead of localStorage.
+## Phase 10: Deployment
 
-Optional: Future Nginx reverse proxy diagram.
+### Step 18 - Environment Files
+```bash
+# .env.example
+DATABASE_URL=postgresql://user:password@localhost:5432/demo_db
+REDIS_URL=redis://localhost:6379
+SECRET_KEY=your-secret-key-here
+DEBUG=true
+ALLOWED_ORIGINS=["http://localhost:3000"]
+```
+
+### Step 19 - Deployment Scripts
+```bash
+#!/bin/bash
+# scripts/deploy.sh
+
+set -e
+
+echo "🚀 Starting deployment..."
+
+# Pull latest code
+git pull origin main
+
+# Build and run with Docker Compose
+docker-compose down
+docker-compose build
+docker-compose up -d
+
+# Run migrations
+docker-compose exec api alembic upgrade head
+
+# Health check
+sleep 10
+curl -f http://localhost:8000/api/v1/health || exit 1
+
+echo "✅ Deployment completed successfully!"
+```
+
+## Step-by-Step Execution
+
+### Phase 1: Setup (Day 1)
+```bash
+mkdir my_demo_app && cd my_demo_app
+# Create all directories and files from Step 1
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+pre-commit install
+```
+
+### Phase 2: Database (Day 1)
+```bash
+# Setup Postgres locally or via Docker
+alembic init alembic
+# Create migration file from Step 5
+alembic upgrade head
+```
+
+### Phase 3: Development (Day 2)
+```bash
+# Implement all modules from Steps 6-12
+uvicorn app.main:app --reload
+# Test endpoints at http://localhost:8000/docs
+```
+
+### Phase 4: Testing (Day 2)
+```bash
+pytest app/tests/ -v
+# Fix any failing tests
+```
+
+### Phase 5: Polish (Day 3)
+```bash
+make format
+make lint
+# Fix any linting issues
+```
+
+### Phase 6: Deployment (Day 3)
+```bash
+docker-compose up -d
+# Test production setup
+./scripts/deploy.sh
+```
+
+This gives you a production-ready FastAPI backend that demonstrates professional development practices and won't look like "copy-paste LLM code."
