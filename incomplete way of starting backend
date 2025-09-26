@@ -594,3 +594,173 @@ Postgres for storage
 Nginx as reverse proxy + SSL + optional load balancing
 
 Optional Docker Compose for all services
+
+Ah yes — now we’re talking making your demo backend look “safe and professional”. Even if it’s a small demo, having some automated content moderation shows foresight. Here’s a structured way to handle it without breaking the bank:
+
+1️⃣ Image Moderation (Inappropriate Content)
+Free / open-source options:
+
+OpenNSFW / Yahoo’s model
+
+Pretrained deep learning model for NSFW content detection.
+
+Can run locally on CPU/GPU.
+
+Input: image → Output: probability NSFW / SFW.
+
+Hugging Face models
+
+E.g., openai/clip-vit-base-patch32 + NSFW classifiers.
+
+Free inference for small-scale demo.
+
+Integration into FastAPI
+from PIL import Image
+import nsfw_detector
+
+model = nsfw_detector.NSFWModel("model-path")
+
+@app.post("/upload_image")
+async def upload_image(file: UploadFile):
+    image = Image.open(file.file)
+    result = model.predict(image)
+    if result["porn"] > 0.5 or result["sexy"] > 0.5:
+        return {"error": "Image flagged as inappropriate"}
+    # Save image or return success
+    return {"message": "Image accepted"}
+
+
+Thresholds are configurable for “safe enough.”
+
+Works for demo-level traffic, no cloud API needed.
+
+2️⃣ Text Filtering (Bad Words)
+Simple approaches
+
+Profanity lists (Python packages like better_profanity or profanity-filter).
+
+Regex or word lists for your supported languages (Spanish + English).
+
+Example:
+
+from better_profanity import profanity
+
+profanity.load_censor_words()
+text = "some user input"
+if profanity.contains_profanity(text):
+    return {"error": "Text contains inappropriate words"}
+
+
+Can combine custom word lists for your domain.
+
+Works offline, free, fast.
+
+3️⃣ Integration into your backend workflow
+
+Companies table → description fields → check text for bad words before insert/update.
+
+Images → image upload endpoint → check for NSFW content before saving.
+
+Combine with Redis caching if you want to store “flagged” results temporarily.
+
+4️⃣ Optional / Advanced
+
+Hugging Face Transformers for more nuanced text classification:
+
+Can detect hate speech, adult content, or spam.
+
+Free to run locally for demo.
+
+Clip Interrogator / OpenCLIP for image + text moderation if you want multimodal filtering.
+
+✅ TL;DR / Practical Plan for Demo
+
+Text moderation: better_profanity + custom word list → block bad words in descriptions.
+
+Image moderation: OpenNSFW / Hugging Face NSFW model → block inappropriate images.
+
+Integration: Validate before DB insert → store only safe content.
+
+Performance: Run locally, async if possible, no paid API required.
+
+If you want, I can sketch a full flow for your backend, showing:
+
+Product / company creation
+
+Redis caching
+
+Raw SQL + FastAPI
+
+Text + image moderation integrated
+
+1️⃣ Security & Hardening
+
+SQL Injection: Always parameterized queries (you already mentioned this).
+
+Secrets: Environment variables for DB, Redis, and any ML models.
+
+HTTPS / TLS: For future Nginx deployment.
+
+CORS: Restrict to frontend origin even for demo (don’t use "*" in production).
+
+Rate limiting: Optional, but prevents accidental DoS in demo.
+
+2️⃣ Validation & Serialization
+
+Pydantic models for all request/response bodies.
+
+Ensure email, UUID, text length, etc., are validated.
+
+Helps your /docs look clean.
+
+3️⃣ Async & Pooling Best Practices
+
+Asyncpg connection pool with sensible min_size / max_size.
+
+Redis async calls with proper TTL.
+
+Batch queries when possible to avoid N+1 problems.
+
+4️⃣ Testing
+
+Unit tests for SQL queries.
+
+Integration tests for endpoints (httpx + pytest-asyncio).
+
+Cache tests: TTL + invalidation.
+
+Security tests: SQL injection, bad words, NSFW images.
+
+Optional: small load test with locust to show pooling + cache works.
+
+5️⃣ Logging & Error Handling
+
+Structured logging.info() and logging.error().
+
+Wrap queries in try/except, sanitize error messages returned to client.
+
+Optional: metrics endpoint /health or /metrics.
+
+6️⃣ Pagination / Limits
+
+Already paginated companies — consider max page size (50–100) to avoid overload.
+
+7️⃣ Content Moderation
+
+Text: better_profanity + custom word list (English + Spanish).
+
+Images: OpenNSFW / Hugging Face models, integrated before DB insert.
+
+Optional: cache flagged content temporarily in Redis.
+
+8️⃣ Optional Polish / Demo Extras
+
+Docker Compose for backend + Redis + Postgres.
+
+Alembic migrations fully versioned.
+
+Gunicorn + Uvicorn workers ready for multi-core demonstration.
+
+Cookie-based JWT session for auth instead of localStorage.
+
+Optional: Future Nginx reverse proxy diagram.
