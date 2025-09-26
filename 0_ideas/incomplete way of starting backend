@@ -1,0 +1,3678 @@
+# FastAPI Production-Ready Deployment Guide
+## PostgreSQL Best Practices with Raw SQL + Connection Pooling
+
+## Phase 1: Project Setup & Environment
+
+### Step 1 - Initialize Project Structure
+```
+my_demo_app/
+├── .env.example
+├── .gitignore
+├── .pre-commit-config.yaml
+├── Makefile
+├── README.md
+├── requirements.txt
+├── requirements-dev.txt
+├── docker-compose.yml
+├── Dockerfile
+├── alembic.ini
+├── alembic/
+│   ├── env.py
+│   └── versions/
+├── app/
+│   ├── __init__.py
+│   ├── main.py                 # FastAPI app
+│   ├── config.py               # Settings & environment
+│   ├── database/
+│   │   ├── __init__.py
+│   │   ├── connection.py       # Connection pool management
+│   │   ├── queries.py          # Raw SQL queries with prepared statements
+│   │   ├── transactions.py     # Transaction management utilities
+│   │   └── monitoring.py       # DB health checks & monitoring
+│   ├── cache/
+│   │   ├── __init__.py
+│   │   └── redis_client.py     # Redis operations
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── v1/
+│   │   │   ├── __init__.py
+│   │   │   ├── endpoints/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── products.py
+│   │   │   │   ├── communes.py
+│   │   │   │   ├── companies.py
+│   │   │   │   └── health.py
+│   │   │   └── router.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── requests.py         # Pydantic request models
+│   │   ├── responses.py        # Pydantic response models
+│   │   └── errors.py           # Error models
+│   ├── middleware/
+│   │   ├── __init__.py
+│   │   ├── cors.py
+│   │   ├── logging.py
+│   │   └── security.py
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   ├── content_moderation.py
+│   │   ├── security.py
+│   │   ├── validators.py
+│   │   └── db_retry.py         # Database retry logic
+│   └── tests/
+│       ├── __init__.py
+│       ├── conftest.py
+│       ├── test_endpoints.py
+│       ├── test_database.py
+│       ├── test_transactions.py
+│       └── test_cache.py
+└── scripts/
+    ├── setup.sh
+    ├── migrate.sh
+    ├── db_health_check.sh
+    └── deploy.sh
+```
+
+### Step 2 - Install Dependencies
+```bash
+# requirements.txt
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+gunicorn==21.2.0
+asyncpg==0.29.0                # PostgreSQL async driver with prepared statements
+alembic==1.12.1
+aioredis==2.0.1
+pydantic[email]==2.5.0
+pydantic-settings==2.1.0
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+better-profanity==0.7.0
+python-magic==0.4.27
+structlog==23.2.0
+tenacity==8.2.3                # For retry logic
+psutil==5.9.6                  # For monitoring pool usage
+
+# requirements-dev.txt
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+black==23.11.0
+isort==5.12.0
+flake8==6.1.0
+mypy==1.7.1
+pre-commit==3.5.0
+locust==2.17.0
+```
+
+### Step 3 - Enhanced Configuration with DB Security
+```python
+# app/config.py
+from pydantic_settings import BaseSettings
+from typing import Optional, List
+import ssl
+
+class Settings(BaseSettings):
+    # Database Connection & Pool Configuration
+    database_url: str
+    db_pool_min_size: int = 5
+    db_pool_max_size: int = 20
+    db_pool_max_queries: int = 50000      # Max queries per connection before reset
+    db_pool_max_inactive: float = 300.0   # Max inactive connection time (5 min)
+    db_timeout: int = 30
+    db_command_timeout: int = 60
+    db_server_timeout: int = 60
+    
+    # Database SSL/TLS (Production security)
+    db_ssl_mode: str = "prefer"           # disable, allow, prefer, require, verify-ca, verify-full
+    db_ssl_cert_path: Optional[str] = None
+    db_ssl_key_path: Optional[str] = None
+    db_ssl_ca_path: Optional[str] = None
+    
+    # Database User & Permissions (Least Privilege)
+    db_read_only_url: Optional[str] = None  # Separate read-only connection
+    
+    # Redis
+    redis_url: str
+    redis_timeout: int = 5
+    cache_ttl: int = 3600
+    redis_ssl: bool = False
+    
+    # Security
+    secret_key: str
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
+    
+    # Content Moderation
+    enable_content_moderation: bool = True
+    max_file_size: int = 10_000_000  # 10MB
+    allowed_file_types: List[str] = ["image/jpeg", "image/png", "image/webp"]
+    
+    # API
+    api_v1_prefix: str = "/api/v1"
+    project_name: str = "Demo API"
+    debug: bool = False
+    
+    # CORS
+    allowed_origins: List[str] = ["http://localhost:3000"]
+    
+    # Database Monitoring & Health
+    db_health_check_interval: int = 30     # seconds
+    db_slow_query_threshold: float = 1.0   # log queries slower than 1s
+    
+    # Retry Configuration
+    db_retry_attempts: int = 3
+    db_retry_wait_multiplier: float = 0.5
+    db_retry_max_wait: float = 5.0
+    
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+```
+
+## Phase 2: Enhanced Database Layer with PostgreSQL Best Practices
+
+### Step 4 - Advanced Connection Pool with SSL & Monitoring
+```python
+# app/database/connection.py
+import asyncpg
+import structlog
+import ssl
+import psutil
+from typing import AsyncGenerator, Optional, Dict, Any
+from contextlib import asynccontextmanager
+from app.config import settings
+
+logger = structlog.get_logger()
+
+# Connection pools
+write_pool: Optional[asyncpg.Pool] = None
+read_pool: Optional[asyncpg.Pool] = None
+
+class DatabasePoolManager:
+    def __init__(self):
+        self.write_pool: Optional[asyncpg.Pool] = None
+        self.read_pool: Optional[asyncpg.Pool] = None
+        self._pool_stats = {"connections": 0, "queries": 0, "errors": 0}
+    
+    async def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
+        """Create SSL context for secure database connections"""
+        if settings.db_ssl_mode == "disable":
+            return None
+        
+        ssl_context = ssl.create_default_context()
+        
+        if settings.db_ssl_mode == "verify-full":
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        elif settings.db_ssl_mode == "verify-ca":
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        elif settings.db_ssl_mode == "require":
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+        
+        # Load client certificates if provided
+        if settings.db_ssl_cert_path and settings.db_ssl_key_path:
+            ssl_context.load_cert_chain(
+                settings.db_ssl_cert_path, 
+                settings.db_ssl_key_path
+            )
+        
+        # Load CA certificate if provided
+        if settings.db_ssl_ca_path:
+            ssl_context.load_verify_locations(settings.db_ssl_ca_path)
+        
+        return ssl_context
+    
+    async def init_pools(self):
+        """Initialize connection pools with proper configuration"""
+        global write_pool, read_pool
+        
+        ssl_context = await self._create_ssl_context()
+        
+        try:
+            # Write pool (main database)
+            self.write_pool = write_pool = await asyncpg.create_pool(
+                dsn=settings.database_url,
+                min_size=settings.db_pool_min_size,
+                max_size=settings.db_pool_max_size,
+                max_queries=settings.db_pool_max_queries,
+                max_inactive_connection_lifetime=settings.db_pool_max_inactive,
+                command_timeout=settings.db_command_timeout,
+                server_settings={
+                    'application_name': f'{settings.project_name}_write',
+                    'tcp_keepalives_idle': '600',
+                    'tcp_keepalives_interval': '30',
+                    'tcp_keepalives_count': '3',
+                },
+                ssl=ssl_context,
+                init=self._init_connection
+            )
+            
+            # Read-only pool (if configured)
+            if settings.db_read_only_url:
+                self.read_pool = read_pool = await asyncpg.create_pool(
+                    dsn=settings.db_read_only_url,
+                    min_size=max(1, settings.db_pool_min_size // 2),
+                    max_size=settings.db_pool_max_size,
+                    max_queries=settings.db_pool_max_queries,
+                    max_inactive_connection_lifetime=settings.db_pool_max_inactive,
+                    command_timeout=settings.db_command_timeout,
+                    server_settings={
+                        'application_name': f'{settings.project_name}_read',
+                        'default_transaction_read_only': 'on',
+                    },
+                    ssl=ssl_context,
+                    init=self._init_connection
+                )
+            else:
+                self.read_pool = read_pool = self.write_pool
+            
+            logger.info("Database pools initialized", 
+                       write_pool_size=self.write_pool.get_size(),
+                       read_pool_size=self.read_pool.get_size())
+            
+        except Exception as e:
+            logger.error("Failed to initialize database pools", error=str(e))
+            raise
+    
+    async def _init_connection(self, conn: asyncpg.Connection):
+        """Initialize each connection with custom settings"""
+        # Set connection-level parameters
+        await conn.execute("SET timezone TO 'UTC'")
+        await conn.execute(f"SET statement_timeout TO '{settings.db_timeout}s'")
+        await conn.execute("SET log_statement_stats TO off")
+        
+        # Enable query logging for slow queries
+        if settings.debug:
+            await conn.execute(f"SET log_min_duration_statement TO {int(settings.db_slow_query_threshold * 1000)}")
+    
+    async def close_pools(self):
+        """Close all connection pools"""
+        if self.write_pool:
+            await self.write_pool.close()
+        if self.read_pool and self.read_pool != self.write_pool:
+            await self.read_pool.close()
+        logger.info("Database pools closed")
+    
+    def get_pool_stats(self) -> Dict[str, Any]:
+        """Get current pool statistics"""
+        stats = {}
+        if self.write_pool:
+            stats["write_pool"] = {
+                "size": self.write_pool.get_size(),
+                "min_size": self.write_pool.get_min_size(),
+                "max_size": self.write_pool.get_max_size(),
+                "idle_connections": self.write_pool.get_idle_size(),
+            }
+        if self.read_pool and self.read_pool != self.write_pool:
+            stats["read_pool"] = {
+                "size": self.read_pool.get_size(),
+                "min_size": self.read_pool.get_min_size(),
+                "max_size": self.read_pool.get_max_size(),
+                "idle_connections": self.read_pool.get_idle_size(),
+            }
+        return stats
+
+# Global pool manager
+pool_manager = DatabasePoolManager()
+
+async def init_db_pools():
+    await pool_manager.init_pools()
+
+async def close_db_pools():
+    await pool_manager.close_pools()
+
+@asynccontextmanager
+async def get_db_connection(read_only: bool = False) -> AsyncGenerator[asyncpg.Connection, None]:
+    """Get database connection with proper error handling"""
+    pool = read_pool if read_only else write_pool
+    
+    if not pool:
+        raise RuntimeError("Database pool not initialized")
+    
+    async with pool.acquire() as conn:
+        try:
+            yield conn
+        except Exception as e:
+            logger.error("Database connection error", error=str(e))
+            raise
+
+# Dependency for FastAPI
+async def get_db() -> AsyncGenerator[asyncpg.Connection, None]:
+    async with get_db_connection() as conn:
+        yield conn
+
+async def get_read_db() -> AsyncGenerator[asyncpg.Connection, None]:
+    async with get_db_connection(read_only=True) as conn:
+        yield conn
+```
+
+### Step 5 - Database Retry Logic & Error Handling
+```python
+# app/utils/db_retry.py
+import asyncpg
+import structlog
+from tenacity import (
+    retry, 
+    stop_after_attempt, 
+    wait_exponential, 
+    retry_if_exception_type,
+    before_sleep_log
+)
+from typing import Callable, Any, TypeVar, Awaitable
+from app.config import settings
+
+logger = structlog.get_logger()
+T = TypeVar('T')
+
+# Transient errors that should be retried
+TRANSIENT_ERRORS = (
+    asyncpg.exceptions.ConnectionDoesNotExistError,
+    asyncpg.exceptions.ConnectionFailureError,
+    asyncpg.exceptions.InterfaceError,
+    asyncpg.exceptions.InternalServerError,
+    asyncpg.exceptions.TooManyConnectionsError,
+    # Deadlock and serialization failures
+    asyncpg.exceptions.DeadlockDetectedError,
+    asyncpg.exceptions.SerializationFailureError,
+)
+
+def db_retry(
+    stop_after: int = settings.db_retry_attempts,
+    wait_multiplier: float = settings.db_retry_wait_multiplier,
+    max_wait: float = settings.db_retry_max_wait
+):
+    """Decorator for database operations with retry logic"""
+    return retry(
+        stop=stop_after_attempt(stop_after),
+        wait=wait_exponential(multiplier=wait_multiplier, max=max_wait),
+        retry=retry_if_exception_type(TRANSIENT_ERRORS),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
+
+async def execute_with_retry(
+    operation: Callable[..., Awaitable[T]], 
+    *args, 
+    **kwargs
+) -> T:
+    """Execute database operation with automatic retry"""
+    
+    @db_retry()
+    async def _execute():
+        return await operation(*args, **kwargs)
+    
+    try:
+        return await _execute()
+    except TRANSIENT_ERRORS as e:
+        logger.error("Database operation failed after retries", 
+                    operation=operation.__name__, error=str(e))
+        raise
+    except Exception as e:
+        logger.error("Database operation failed with non-retryable error", 
+                    operation=operation.__name__, error=str(e))
+        raise
+```
+
+### Step 6 - Transaction Management
+```python
+# app/database/transactions.py
+import asyncpg
+import structlog
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator, Optional, List, Callable, Any
+from enum import Enum
+from app.utils.db_retry import execute_with_retry
+
+logger = structlog.get_logger()
+
+class IsolationLevel(Enum):
+    READ_UNCOMMITTED = "read uncommitted"
+    READ_COMMITTED = "read committed" 
+    REPEATABLE_READ = "repeatable read"
+    SERIALIZABLE = "serializable"
+
+@asynccontextmanager
+async def db_transaction(
+    conn: asyncpg.Connection,
+    isolation: IsolationLevel = IsolationLevel.READ_COMMITTED,
+    readonly: bool = False,
+    deferrable: bool = False
+) -> AsyncGenerator[asyncpg.Connection, None]:
+    """
+    Advanced transaction context manager with proper isolation levels
+    """
+    transaction_options = []
+    transaction_options.append(f"ISOLATION LEVEL {isolation.value}")
+    
+    if readonly:
+        transaction_options.append("READ ONLY")
+    if deferrable:
+        transaction_options.append("DEFERRABLE")
+    
+    transaction_sql = f"BEGIN {' '.join(transaction_options)}"
+    
+    try:
+        await conn.execute(transaction_sql)
+        logger.debug("Transaction started", isolation=isolation.value, readonly=readonly)
+        
+        yield conn
+        
+        await conn.execute("COMMIT")
+        logger.debug("Transaction committed")
+        
+    except Exception as e:
+        try:
+            await conn.execute("ROLLBACK")
+            logger.warning("Transaction rolled back", error=str(e))
+        except Exception as rollback_error:
+            logger.error("Failed to rollback transaction", 
+                        original_error=str(e), 
+                        rollback_error=str(rollback_error))
+        raise
+
+class TransactionManager:
+    """High-level transaction operations"""
+    
+    @staticmethod
+    async def execute_in_transaction(
+        conn: asyncpg.Connection,
+        operations: List[Callable],
+        isolation: IsolationLevel = IsolationLevel.READ_COMMITTED
+    ) -> List[Any]:
+        """Execute multiple operations in a single transaction"""
+        results = []
+        
+        async with db_transaction(conn, isolation=isolation):
+            for operation in operations:
+                result = await execute_with_retry(operation)
+                results.append(result)
+        
+        return results
+    
+    @staticmethod
+    async def batch_insert_with_conflict_resolution(
+        conn: asyncpg.Connection,
+        table: str,
+        data: List[dict],
+        conflict_columns: List[str],
+        update_columns: Optional[List[str]] = None
+    ) -> int:
+        """Batch insert with ON CONFLICT handling"""
+        if not data:
+            return 0
+        
+        columns = list(data[0].keys())
+        placeholders = ', '.join([f'${i+1}' for i in range(len(columns))])
+        column_names = ', '.join(columns)
+        
+        conflict_clause = ', '.join(conflict_columns)
+        
+        if update_columns:
+            update_clause = ', '.join([f'{col} = EXCLUDED.{col}' for col in update_columns])
+            sql = f"""
+                INSERT INTO {table} ({column_names})
+                VALUES ({placeholders})
+                ON CONFLICT ({conflict_clause})
+                DO UPDATE SET {update_clause}
+            """
+        else:
+            sql = f"""
+                INSERT INTO {table} ({column_names})
+                VALUES ({placeholders})
+                ON CONFLICT ({conflict_clause}) DO NOTHING
+            """
+        
+        async with db_transaction(conn):
+            rows_affected = 0
+            for row_data in data:
+                values = [row_data[col] for col in columns]
+                result = await conn.execute(sql, *values)
+                if result.split()[-1].isdigit():
+                    rows_affected += int(result.split()[-1])
+        
+        return rows_affected
+```
+
+### Step 7 - Enhanced Query Layer with Prepared Statements
+```python
+# app/database/queries.py
+import asyncpg
+import structlog
+from typing import List, Dict, Any, Optional, Union
+from uuid import UUID
+from datetime import datetime
+from app.utils.db_retry import execute_with_retry, db_retry
+from app.database.transactions import db_transaction, IsolationLevel
+
+logger = structlog.get_logger()
+
+class QueryBuilder:
+    """Safe query builder with parameterization"""
+    
+    def __init__(self, table: str):
+        self.table = table
+        self.select_fields = ["*"]
+        self.where_conditions = []
+        self.join_clauses = []
+        self.order_by_clauses = []
+        self.limit_value = None
+        self.offset_value = None
+        self.params = []
+        self.param_count = 0
+    
+    def select(self, fields: List[str]):
+        self.select_fields = fields
+        return self
+    
+    def where(self, condition: str, *values):
+        """Add WHERE condition with parameterized values"""
+        # Replace ? with $n for PostgreSQL
+        param_placeholders = []
+        for value in values:
+            self.param_count += 1
+            param_placeholders.append(f"${self.param_count}")
+            self.params.append(value)
+        
+        # Replace ? with actual parameter placeholders
+        formatted_condition = condition
+        for placeholder in param_placeholders:
+            formatted_condition = formatted_condition.replace("?", placeholder, 1)
+        
+        self.where_conditions.append(formatted_condition)
+        return self
+    
+    def join(self, join_clause: str):
+        self.join_clauses.append(join_clause)
+        return self
+    
+    def order_by(self, field: str, direction: str = "ASC"):
+        self.order_by_clauses.append(f"{field} {direction}")
+        return self
+    
+    def limit(self, count: int):
+        self.limit_value = count
+        return self
+    
+    def offset(self, count: int):
+        self.offset_value = count
+        return self
+    
+    def build(self) -> tuple[str, list]:
+        """Build the final SQL query with parameters"""
+        query_parts = [f"SELECT {', '.join(self.select_fields)} FROM {self.table}"]
+        
+        if self.join_clauses:
+            query_parts.extend(self.join_clauses)
+        
+        if self.where_conditions:
+            query_parts.append(f"WHERE {' AND '.join(self.where_conditions)}")
+        
+        if self.order_by_clauses:
+            query_parts.append(f"ORDER BY {', '.join(self.order_by_clauses)}")
+        
+        if self.limit_value:
+            self.param_count += 1
+            query_parts.append(f"LIMIT ${self.param_count}")
+            self.params.append(self.limit_value)
+        
+        if self.offset_value:
+            self.param_count += 1
+            query_parts.append(f"OFFSET ${self.param_count}")
+            self.params.append(self.offset_value)
+        
+        return " ".join(query_parts), self.params
+
+class DatabaseQueries:
+    """Enhanced query class with prepared statements and safety measures"""
+    
+    def __init__(self):
+        # Prepared statement cache
+        self._prepared_statements = {}
+    
+    async def _get_or_prepare_statement(
+        self, 
+        conn: asyncpg.Connection, 
+        name: str, 
+        query: str
+    ) -> asyncpg.PreparedStatement:
+        """Get cached prepared statement or create new one"""
+        cache_key = f"{id(conn)}_{name}"
+        
+        if cache_key not in self._prepared_statements:
+            try:
+                self._prepared_statements[cache_key] = await conn.prepare(query)
+                logger.debug("Prepared statement cached", name=name)
+            except Exception as e:
+                logger.error("Failed to prepare statement", name=name, error=str(e))
+                raise
+        
+        return self._prepared_statements[cache_key]
+    
+    @db_retry()
+    async def fetch_products(self, conn: asyncpg.Connection) -> List[Dict[str, Any]]:
+        """Fetch all products with prepared statement"""
+        query = """
+            SELECT uuid, name_es, name_en, created_at 
+            FROM products 
+            WHERE deleted_at IS NULL 
+            ORDER BY name_es
+        """
+        
+        stmt = await self._get_or_prepare_statement(conn, "fetch_products", query)
+        rows = await stmt.fetch()
+        return [dict(row) for row in rows]
+    
+    @db_retry()
+    async def fetch_communes(self, conn: asyncpg.Connection) -> List[Dict[str, Any]]:
+        """Fetch all communes with prepared statement"""
+        query = """
+            SELECT uuid, name, created_at 
+            FROM communes 
+            WHERE deleted_at IS NULL 
+            ORDER BY name
+        """
+        
+        stmt = await self._get_or_prepare_statement(conn, "fetch_communes", query)
+        rows = await stmt.fetch()
+        return [dict(row) for row in rows]
+    
+    @db_retry()
+    async def fetch_companies_paginated(
+        self,
+        conn: asyncpg.Connection, 
+        page: int = 1, 
+        page_size: int = 10,
+        product_uuid: Optional[str] = None,
+        commune_uuid: Optional[str] = None,
+        search: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Enhanced paginated company fetch with proper parameterization"""
+        
+        # Build query with QueryBuilder for safety
+        query_builder = QueryBuilder("companies")
+        query_builder.select([
+            "uuid", "name", "description_es", "description_en",
+            "address", "phone", "email", "image_url", 
+            "created_at", "updated_at"
+        ])
+        
+        # Base condition
+        query_builder.where("deleted_at IS NULL")
+        
+        # Add filters safely
+        if product_uuid:
+            query_builder.where("product_uuid = ?", product_uuid)
+        
+        if commune_uuid:
+            query_builder.where("commune_uuid = ?", commune_uuid)
+        
+        if search:
+            query_builder.where("name ILIKE ?", f"%{search}%")
+        
+        # Build count query
+        count_builder = QueryBuilder("companies")
+        count_builder.select(["COUNT(*) as total"])
+        count_builder.where("deleted_at IS NULL")
+        
+        if product_uuid:
+            count_builder.where("product_uuid = ?", product_uuid)
+        if commune_uuid:
+            count_builder.where("commune_uuid = ?", commune_uuid)
+        if search:
+            count_builder.where("name ILIKE ?", f"%{search}%")
+        
+        # Execute queries in transaction for consistency
+        async with db_transaction(conn, isolation=IsolationLevel.READ_COMMITTED, readonly=True):
+            # Get total count
+            count_query, count_params = count_builder.build()
+            total = await conn.fetchval(count_query, *count_params)
+            
+            # Get paginated data
+            offset = (page - 1) * page_size
+            data_query_builder = query_builder.order_by("created_at", "DESC").limit(page_size).offset(offset)
+            data_query, data_params = data_query_builder.build()
+            
+            rows = await conn.fetch(data_query, *data_params)
+        
+        return {
+            "items": [dict(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size
+        }
+    
+    @db_retry()
+    async def create_company(
+        self, 
+        conn: asyncpg.Connection, 
+        company_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Create company with proper transaction handling"""
+        
+        insert_query = """
+            INSERT INTO companies (
+                user_uuid, product_uuid, commune_uuid, name,
+                description_es, description_en, address, phone, email, image_url
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING uuid, name, created_at, updated_at
+        """
+        
+        async with db_transaction(conn, isolation=IsolationLevel.READ_COMMITTED):
+            # Validate foreign key constraints first
+            await self._validate_foreign_keys(conn, company_data)
+            
+            row = await conn.fetchrow(
+                insert_query,
+                company_data["user_uuid"],
+                company_data["product_uuid"],
+                company_data["commune_uuid"],
+                company_data["name"],
+                company_data.get("description_es"),
+                company_data.get("description_en"),
+                company_data.get("address"),
+                company_data.get("phone"),
+                company_data.get("email"),
+                company_data.get("image_url")
+            )
+            
+            logger.info("Company created", company_uuid=row["uuid"], name=row["name"])
+            return dict(row)
+    
+    async def _validate_foreign_keys(self, conn: asyncpg.Connection, data: Dict[str, Any]):
+        """Validate foreign key references exist"""
+        # Check product exists
+        if "product_uuid" in data:
+            product_exists = await conn.fetchval(
+                "SELECT 1 FROM products WHERE uuid = $1 AND deleted_at IS NULL",
+                data["product_uuid"]
+            )
+            if not product_exists:
+                raise ValueError(f"Product with UUID {data['product_uuid']} not found")
+        
+        # Check commune exists  
+        if "commune_uuid" in data:
+            commune_exists = await conn.fetchval(
+                "SELECT 1 FROM communes WHERE uuid = $1 AND deleted_at IS NULL", 
+                data["commune_uuid"]
+            )
+            if not commune_exists:
+                raise ValueError(f"Commune with UUID {data['commune_uuid']} not found")
+    
+    @db_retry()
+    async def soft_delete_company(self, conn: asyncpg.Connection, company_uuid: UUID) -> bool:
+        """Soft delete company with proper transaction"""
+        update_query = """
+            UPDATE companies 
+            SET deleted_at = NOW(), updated_at = NOW()
+            WHERE uuid = $1 AND deleted_at IS NULL
+        """
+        
+        async with db_transaction(conn):
+            result = await conn.execute(update_query, company_uuid)
+            rows_affected = int(result.split()[-1])
+            
+            if rows_affected > 0:
+                logger.info("Company soft deleted", company_uuid=company_uuid)
+                return True
+            else:
+                logger.warning("Company not found for deletion", company_uuid=company_uuid)
+                return False
+
+# Global query instance
+queries = DatabaseQueries()
+```
+
+### Step 8 - Database Health Monitoring
+```python
+# app/database/monitoring.py
+import asyncpg
+import structlog
+import psutil
+from typing import Dict, Any, List
+from datetime import datetime, timedelta
+from app.database.connection import pool_manager, write_pool, read_pool
+from app.config import settings
+
+logger = structlog.get_logger()
+
+class DatabaseMonitor:
+    """Database health and performance monitoring"""
+    
+    def __init__(self):
+        self.slow_queries = []
+        self.connection_errors = []
+        self.last_health_check = None
+    
+    async def health_check(self, conn: asyncpg.Connection) -> Dict[str, Any]:
+        """Comprehensive database health check"""
+        start_time = datetime.now()
+        health_status = {
+            "status": "healthy",
+            "timestamp": start_time.isoformat(),
+            "checks": {}
+        }
+        
+        try:
+            # Basic connectivity test
+            await conn.fetchval("SELECT 1")
+            health_status["checks"]["connectivity"] = {"status": "ok", "latency_ms": 0}
+            
+            # Connection pool status
+            pool_stats = pool_manager.get_pool_stats()
+            health_status["checks"]["connection_pools"] = {
+                "status": "ok",
+                "details": pool_stats
+            }
+            
+            # Database version and settings
+            db_version = await conn.fetchval("SELECT version()")
+            health_status["checks"]["database"] = {
+                "status": "ok",
+                "version": db_version,
+                "current_database": await conn.fetchval("SELECT current_database()"),
+                "current_user": await conn.fetchval("SELECT current_user")
+            }
+            
+            # Check for long-running queries
+            long_queries = await self._check_long_running_queries(conn)
+            if long_queries:
+                health_status["checks"]["long_running_queries"] = {
+                    "status": "warning",
+                    "count": len(long_queries),
+                    "queries": long_queries[:5]  # Limit to first 5
+                }
+            else:
+                health_status["checks"]["long_running_queries"] = {"status": "ok"}
+            
+            # Check database locks
+            locks = await self._check_database_locks(conn)
+            if locks:
+                health_status["checks"]["locks"] = {
+                    "status": "warning",
+                    "count": len(locks),
+                    "details": locks[:10]  # Limit to first 10
+                }
+            else:
+                health_status["checks"]["locks"] = {"status": "ok"}
+            
+            # Check table sizes and bloat (basic check)
+            table_stats = await self._get_table_statistics(conn)
+            health_status["checks"]["tables"] = {
+                "status": "ok",
+                "statistics": table_stats
+            }
+            
+            # Calculate total check time
+            end_time = datetime.now()
+            health_status["checks"]["connectivity"]["latency_ms"] = int(
+                (end_time - start_time).total_seconds() * 1000
+            )
+            
+            self.last_health_check = end_time
+            
+        except Exception as e:
+            logger.error("Database health check failed", error=str(e))
+            health_status["status"] = "unhealthy"
+            health_status["error"] = str(e)
+        
+        return health_status
+    
+    async def _check_long_running_queries(self, conn: asyncpg.Connection) -> List[Dict[str, Any]]:
+        """Check for queries running longer than threshold"""
+        query = """
+            SELECT 
+                pid,
+                now() - pg_stat_activity.query_start AS duration,
+                query,
+                state,
+                usename,
+                datname
+            FROM pg_stat_activity 
+            WHERE (now() - pg_stat_activity.query_start) > interval '%s seconds'
+              AND state = 'active'
+              AND pid != pg_backend_pid()
+        """ % settings.db_slow_query_threshold
+        
+        rows = await conn.fetch(query)
+        return [dict(row) for row in rows]
+    
+    async def _check_database_locks(self, conn: asyncpg.Connection) -> List[Dict[str, Any]]:
+        """Check for blocking database locks"""
+        query = """
+            SELECT 
+                blocked_locks.pid AS blocked_pid,
+                blocked_activity.usename AS blocked_user,
+                blocking_locks.pid AS blocking_pid,
+                blocking_activity.usename AS blocking_user,
+                blocked_activity.query AS blocked_statement,
+                blocking_activity.query AS blocking_statement,
+                blocked_activity.application_name AS blocked_application,
+                blocking_activity.application_name AS blocking_application
+            FROM pg_catalog.pg_locks blocked_locks
+            JOIN pg_catalog.pg_stat_activity blocked_activity 
+                ON blocked_activity.pid = blocked_locks.pid
+            JOIN pg_catalog.pg_locks blocking_locks 
+                ON blocking_locks.locktype = blocked_locks.locktype
+                AND blocking_locks.DATABASE IS NOT DISTINCT FROM blocked_locks.DATABASE
+                AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+                AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+                AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+                AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+                AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+                AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+                AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+                AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+                AND blocking_locks.pid != blocked_locks.pid
+            JOIN pg_catalog.pg_stat_activity blocking_activity 
+                ON blocking_activity.pid = blocking_locks.pid
+            WHERE NOT blocked_locks.GRANTED
+        """
+        
+        rows = await conn.fetch(query)
+        return [dict(row) for row in rows]
+    
+    async def _get_table_statistics(self, conn: asyncpg.Connection) -> Dict[str, Any]:
+        """Get basic table statistics"""
+        query = """
+            SELECT 
+                schemaname,
+                tablename,
+                n_tup_ins as inserts,
+                n_tup_upd as updates,
+                n_tup_del as deletes,
+                n_live_tup as live_tuples,
+                n_dead_tup as dead_tuples,
+                last_vacuum,
+                last_autovacuum,
+                last_analyze,
+                last_autoanalyze
+            FROM pg_stat_user_tables 
+            WHERE schemaname = 'public'
+            ORDER BY n_live_tup DESC
+        """
+        
+        rows = await conn.fetch(query)
+        return [dict(row) for row in rows]
+    
+    async def get_connection_pool_metrics(self) -> Dict[str, Any]:
+        """Get detailed connection pool metrics"""
+        metrics = {
+            "timestamp": datetime.now().isoformat(),
+            "pools": pool_manager.get_pool_stats()
+        }
+        
+        # Add system resource usage
+        try:
+            process = psutil.Process()
+            metrics["system"] = {
+                "memory_usage_mb": process.memory_info().rss / 1024 / 1024,
+                "cpu_percent": process.cpu_percent(),
+                "open_files": len(process.open_files()),
+                "connections": len(process.connections())
+            }
+        except Exception as e:
+            logger.warning("Failed to get system metrics", error=str(e))
+        
+        return metrics
+    
+    def log_slow_query(self, query: str, duration: float, params: List[Any] = None):
+        """Log slow query for analysis"""
+        slow_query = {
+            "timestamp": datetime.now().isoformat(),
+            "query": query[:500],  # Truncate long queries
+            "duration_ms": duration * 1000,
+            "params": str(params)[:200] if params else None
+        }
+        
+        self.slow_queries.append(slow_query)
+        
+        # Keep only last 100 slow queries
+        if len(self.slow_queries) > 100:
+            self.slow_queries = self.slow_queries[-100:]
+        
+        logger.warning("Slow query detected", **slow_query)
+    
+    def log_connection_error(self, error: Exception, context: str = None):
+        """Log connection error for monitoring"""
+        error_info = {
+            "timestamp": datetime.now().isoformat(),
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "context": context
+        }
+        
+        self.connection_errors.append(error_info)
+        
+        # Keep only last 50 errors
+        if len(self.connection_errors) > 50:
+            self.connection_errors = self.connection_errors[-50:]
+        
+        logger.error("Database connection error", **error_info)
+    
+    def get_metrics_summary(self) -> Dict[str, Any]:
+        """Get summary of collected metrics"""
+        now = datetime.now()
+        recent_errors = [
+            err for err in self.connection_errors
+            if datetime.fromisoformat(err["timestamp"]) > now - timedelta(hours=1)
+        ]
+        
+        recent_slow_queries = [
+            query for query in self.slow_queries
+            if datetime.fromisoformat(query["timestamp"]) > now - timedelta(hours=1)
+        ]
+        
+        return {
+            "last_health_check": self.last_health_check.isoformat() if self.last_health_check else None,
+            "recent_errors_1h": len(recent_errors),
+            "recent_slow_queries_1h": len(recent_slow_queries),
+            "total_errors": len(self.connection_errors),
+            "total_slow_queries": len(self.slow_queries),
+            "avg_slow_query_duration": (
+                sum(q["duration_ms"] for q in recent_slow_queries) / len(recent_slow_queries)
+                if recent_slow_queries else 0
+            )
+        }
+
+# Global monitor instance
+db_monitor = DatabaseMonitor()
+```
+
+## Phase 3: Enhanced Migration System
+
+### Step 9 - Advanced Alembic Migration with Constraints & Optimized Indexes
+```python
+# alembic/versions/001_initial_tables.py
+"""Initial tables with optimized indexes and constraints
+
+Revision ID: 001_initial
+Revises: 
+Create Date: 2024-01-01 10:00:00.000000
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = '001_initial'
+down_revision = None
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    # Enable required extensions
+    op.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
+    op.execute("CREATE EXTENSION IF NOT EXISTS \"pg_trgm\"")  # For text search
+    op.execute("CREATE EXTENSION IF NOT EXISTS \"btree_gin\"")  # For composite indexes
+    
+    # Products table with constraints
+    op.execute("""
+        CREATE TABLE products (
+            uuid UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            name_es TEXT NOT NULL CHECK (char_length(name_es) BETWEEN 1 AND 255),
+            name_en TEXT NOT NULL CHECK (char_length(name_en) BETWEEN 1 AND 255),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            deleted_at TIMESTAMPTZ NULL,
+            
+            -- Ensure both names are provided
+            CONSTRAINT products_names_not_empty CHECK (
+                trim(name_es) != '' AND trim(name_en) != ''
+            )
+        );
+        
+        -- Optimized indexes for products
+        CREATE INDEX idx_products_name_es_active ON products(name_es) 
+            WHERE deleted_at IS NULL;
+        CREATE INDEX idx_products_name_en_active ON products(name_en) 
+            WHERE deleted_at IS NULL;
+        CREATE INDEX idx_products_created_at_active ON products(created_at DESC) 
+            WHERE deleted_at IS NULL;
+        CREATE INDEX idx_products_text_search ON products 
+            USING gin(to_tsvector('simple', name_es || ' ' || name_en)) 
+            WHERE deleted_at IS NULL;
+    """)
+    
+    # Communes table with unique constraints
+    op.execute("""
+        CREATE TABLE communes (
+            uuid UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 100),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            deleted_at TIMESTAMPTZ NULL,
+            
+            -- Ensure unique active commune names
+            CONSTRAINT communes_name_not_empty CHECK (trim(name) != '')
+        );
+        
+        -- Unique index for active communes only
+        CREATE UNIQUE INDEX idx_communes_name_active ON communes(LOWER(name)) 
+            WHERE deleted_at IS NULL;
+        CREATE INDEX idx_communes_created_at_active ON communes(created_at DESC) 
+            WHERE deleted_at IS NULL;
+    """)
+    
+    # Companies table with comprehensive constraints
+    op.execute("""
+        CREATE TABLE companies (
+            uuid UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            user_uuid UUID NOT NULL,
+            product_uuid UUID NOT NULL,
+            commune_uuid UUID NOT NULL,
+            name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 255),
+            description_es TEXT CHECK (char_length(description_es) <= 2000),
+            description_en TEXT CHECK (char_length(description_en) <= 2000),
+            address TEXT CHECK (char_length(address) <= 500),
+            phone TEXT CHECK (phone ~ '^[0-9+\-\s()ext.]+ AND char_length(phone) <= 20),
+            email TEXT CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}),
+            image_url TEXT CHECK (char_length(image_url) <= 1000),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            deleted_at TIMESTAMPTZ NULL,
+            
+            -- Foreign key constraints with proper naming
+            CONSTRAINT fk_companies_product FOREIGN KEY (product_uuid) 
+                REFERENCES products(uuid) ON DELETE RESTRICT,
+            CONSTRAINT fk_companies_commune FOREIGN KEY (commune_uuid) 
+                REFERENCES communes(uuid) ON DELETE RESTRICT,
+            
+            -- Business logic constraints
+            CONSTRAINT companies_name_not_empty CHECK (trim(name) != ''),
+            CONSTRAINT companies_descriptions_check CHECK (
+                (description_es IS NULL OR trim(description_es) != '') AND
+                (description_en IS NULL OR trim(description_en) != '')
+            )
+        );
+        
+        -- Comprehensive indexing strategy
+        CREATE INDEX idx_companies_product_uuid_active ON companies(product_uuid) 
+            WHERE deleted_at IS NULL;
+        CREATE INDEX idx_companies_commune_uuid_active ON companies(commune_uuid) 
+            WHERE deleted_at IS NULL;
+        CREATE INDEX idx_companies_user_uuid_active ON companies(user_uuid) 
+            WHERE deleted_at IS NULL;
+        CREATE INDEX idx_companies_created_at_active ON companies(created_at DESC) 
+            WHERE deleted_at IS NULL;
+        CREATE INDEX idx_companies_updated_at_active ON companies(updated_at DESC) 
+            WHERE deleted_at IS NULL;
+        
+        -- Full-text search index for company names and descriptions
+        CREATE INDEX idx_companies_text_search ON companies 
+            USING gin(to_tsvector('spanish', 
+                COALESCE(name, '') || ' ' || 
+                COALESCE(description_es, '') || ' ' || 
+                COALESCE(description_en, '')
+            )) WHERE deleted_at IS NULL;
+        
+        -- Composite index for common query patterns
+        CREATE INDEX idx_companies_product_commune_created ON companies(product_uuid, commune_uuid, created_at DESC) 
+            WHERE deleted_at IS NULL;
+        
+        -- Partial index for companies with images
+        CREATE INDEX idx_companies_with_images ON companies(uuid, image_url) 
+            WHERE deleted_at IS NULL AND image_url IS NOT NULL;
+    """)
+    
+    # Create updated_at trigger function
+    op.execute("""
+        CREATE OR REPLACE FUNCTION update_updated_at_column()
+        RETURNS TRIGGER AS $
+        BEGIN
+            NEW.updated_at = NOW();
+            RETURN NEW;
+        END;
+        $ language 'plpgsql';
+    """)
+    
+    # Apply triggers to all tables
+    for table in ['products', 'communes', 'companies']:
+        op.execute(f"""
+            CREATE TRIGGER trigger_update_{table}_updated_at 
+            BEFORE UPDATE ON {table}
+            FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+        """)
+    
+    # Create database statistics and maintenance functions
+    op.execute("""
+        -- Function to get table statistics
+        CREATE OR REPLACE FUNCTION get_table_stats()
+        RETURNS TABLE(
+            table_name text,
+            row_count bigint,
+            table_size text,
+            index_size text,
+            total_size text
+        ) AS $
+        BEGIN
+            RETURN QUERY
+            SELECT 
+                t.tablename::text,
+                t.n_live_tup,
+                pg_size_pretty(pg_total_relation_size(c.oid) - pg_indexes_size(c.oid))::text,
+                pg_size_pretty(pg_indexes_size(c.oid))::text,
+                pg_size_pretty(pg_total_relation_size(c.oid))::text
+            FROM pg_stat_user_tables t
+            JOIN pg_class c ON c.relname = t.tablename
+            WHERE t.schemaname = 'public'
+            ORDER BY pg_total_relation_size(c.oid) DESC;
+        END;
+        $ LANGUAGE plpgsql;
+    """)
+
+def downgrade():
+    # Drop functions
+    op.execute("DROP FUNCTION IF EXISTS get_table_stats();")
+    op.execute("DROP FUNCTION IF EXISTS update_updated_at_column();")
+    
+    # Drop tables (cascades will handle indexes and triggers)
+    op.execute("DROP TABLE IF EXISTS companies CASCADE;")
+    op.execute("DROP TABLE IF EXISTS products CASCADE;") 
+    op.execute("DROP TABLE IF EXISTS communes CASCADE;")
+    
+    # Drop extensions (optional, might be used by other parts)
+    # op.execute("DROP EXTENSION IF EXISTS \"btree_gin\";")
+    # op.execute("DROP EXTENSION IF EXISTS \"pg_trgm\";")
+    # op.execute("DROP EXTENSION IF EXISTS \"uuid-ossp\";")
+```
+
+## Phase 4: Enhanced API Layer
+
+### Step 10 - Production Health Check Endpoint
+```python
+# app/api/v1/endpoints/health.py
+from fastapi import APIRouter, HTTPException, Depends, status
+from typing import Dict, Any
+import asyncpg
+from app.database.connection import get_db
+from app.database.monitoring import db_monitor
+from app.cache.redis_client import redis
+from app.config import settings
+
+router = APIRouter(tags=["Health"])
+
+@router.get("/health", 
+           summary="Basic Health Check",
+           description="Quick health check for load balancers")
+async def health_check():
+    """Basic health check endpoint for load balancers"""
+    return {"status": "healthy", "service": settings.project_name}
+
+@router.get("/health/detailed",
+           response_model=Dict[str, Any],
+           summary="Detailed Health Check", 
+           description="Comprehensive health check with all service dependencies")
+async def detailed_health_check(db: asyncpg.Connection = Depends(get_db)):
+    """Comprehensive health check including database and cache"""
+    try:
+        health_status = await db_monitor.health_check(db)
+        
+        # Test Redis connectivity
+        try:
+            await redis.ping()
+            health_status["checks"]["redis"] = {"status": "ok"}
+        except Exception as e:
+            health_status["checks"]["redis"] = {
+                "status": "error", 
+                "error": str(e)
+            }
+            health_status["status"] = "degraded"
+        
+        # Add service metadata
+        health_status["service"] = {
+            "name": settings.project_name,
+            "version": "1.0.0",
+            "debug_mode": settings.debug
+        }
+        
+        # Return appropriate HTTP status
+        if health_status["status"] == "unhealthy":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=health_status
+            )
+        elif health_status["status"] == "degraded":
+            return health_status  # 200 but with warnings
+        
+        return health_status
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "status": "unhealthy",
+                "error": str(e),
+                "service": settings.project_name
+            }
+        )
+
+@router.get("/health/metrics",
+           response_model=Dict[str, Any],
+           summary="Performance Metrics",
+           description="Database and connection pool performance metrics")
+async def metrics():
+    """Get performance metrics for monitoring systems"""
+    try:
+        metrics = await db_monitor.get_connection_pool_metrics()
+        metrics.update(db_monitor.get_metrics_summary())
+        return metrics
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get metrics: {str(e)}"
+        )
+
+@router.get("/health/readiness",
+           summary="Readiness Probe",
+           description="Kubernetes readiness probe endpoint")
+async def readiness_check(db: asyncpg.Connection = Depends(get_db)):
+    """Readiness check for Kubernetes deployments"""
+    try:
+        # Quick database connectivity test
+        await db.fetchval("SELECT 1")
+        return {"status": "ready"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"status": "not ready", "error": str(e)}
+        )
+
+@router.get("/health/liveness",
+           summary="Liveness Probe", 
+           description="Kubernetes liveness probe endpoint")
+async def liveness_check():
+    """Liveness check for Kubernetes deployments"""
+    return {"status": "alive"}
+```
+
+### Step 11 - Enhanced Company Endpoints with Error Handling
+```python
+# app/api/v1/endpoints/companies.py
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from typing import List, Optional
+import asyncpg
+from uuid import UUID
+from app.database.connection import get_db, get_read_db
+from app.database.queries import queries
+from app.cache.redis_client import get_or_set_cache, invalidate_cache
+from app.models.responses import CompanyOut, PaginatedResponse
+from app.models.requests import CompanyCreate, CompanyUpdate
+from app.utils.content_moderation import moderator
+from app.database.monitoring import db_monitor
+
+router = APIRouter(tags=["Companies"])
+
+@router.get("/companies",
+           response_model=PaginatedResponse,
+           summary="List Companies",
+           description="Get paginated list of companies with optional filtering")
+async def get_companies(
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    product_uuid: Optional[str] = Query(None, description="Filter by product UUID"),
+    commune_uuid: Optional[str] = Query(None, description="Filter by commune UUID"), 
+    search: Optional[str] = Query(None, max_length=100, description="Search in company names"),
+    db: asyncpg.Connection = Depends(get_read_db)  # Use read replica
+):
+    """Get paginated companies with filtering and caching"""
+    
+    try:
+        # Build cache key from parameters
+        cache_key = f"companies:page={page}:size={page_size}:product={product_uuid}:commune={commune_uuid}:search={search}"
+        
+        result = await get_or_set_cache(
+            cache_key,
+            queries.fetch_companies_paginated,
+            ttl=300,  # 5 minutes cache for listings
+            conn=db,
+            page=page,
+            page_size=page_size,
+            product_uuid=product_uuid,
+            commune_uuid=commune_uuid,
+            search=search
+        )
+        
+        return result
+        
+    except ValueError as e:
+        # Handle validation errors (like invalid UUIDs)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        db_monitor.log_connection_error(e, "get_companies")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch companies"
+        )
+
+@router.post("/companies",
+            response_model=CompanyOut,
+            status_code=status.HTTP_201_CREATED,
+            summary="Create Company",
+            description="Create a new company with content moderation")
+async def create_company(
+    company_data: CompanyCreate,
+    db: asyncpg.Connection = Depends(get_db)
+):
+    """Create new company with content moderation and validation"""
+    
+    try:
+        # Content moderation for text fields
+        text_fields = [
+            ("name", company_data.name),
+            ("description_es", company_data.description_es),
+            ("description_en", company_data.description_en),
+            ("address", company_data.address)
+        ]
+        
+        for field_name, field_value in text_fields:
+            if field_value:
+                is_safe, error_msg = moderator.check_text_content(field_value)
+                if not is_safe:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Content moderation failed for {field_name}: {error_msg}"
+                    )
+        
+        # Convert to dict for database operation
+        company_dict = company_data.model_dump(exclude_unset=True)
+        
+        # Create company
+        result = await queries.create_company(db, company_dict)
+        
+        # Invalidate related caches
+        await invalidate_cache(
+            "products_all",
+            "communes_all",
+            f"companies:*"  # Pattern to invalidate all company list caches
+        )
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        db_monitor.log_connection_error(e, "create_company")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create company"
+        )
+
+@router.get("/companies/{company_uuid}",
+           response_model=CompanyOut,
+           summary="Get Company",
+           description="Get company by UUID")
+async def get_company(
+    company_uuid: UUID,
+    db: asyncpg.Connection = Depends(get_read_db)
+):
+    """Get single company by UUID with caching"""
+    
+    try:
+        cache_key = f"company:{company_uuid}"
+        
+        async def fetch_company():
+            result = await db.fetchrow(
+                """
+                SELECT uuid, name, description_es, description_en, 
+                       address, phone, email, image_url, created_at, updated_at
+                FROM companies 
+                WHERE uuid = $1 AND deleted_at IS NULL
+                """,
+                company_uuid
+            )
+            return dict(result) if result else None
+        
+        company = await get_or_set_cache(
+            cache_key,
+            fetch_company,
+            ttl=3600  # 1 hour cache for individual companies
+        )
+        
+        if not company:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Company not found"
+            )
+        
+        return company
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db_monitor.log_connection_error(e, "get_company")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch company"
+        )
+
+@router.put("/companies/{company_uuid}",
+           response_model=CompanyOut,
+           summary="Update Company", 
+           description="Update company with content moderation")
+async def update_company(
+    company_uuid: UUID,
+    company_data: CompanyUpdate,
+    db: asyncpg.Connection = Depends(get_db)
+):
+    """Update company with content moderation"""
+    
+    try:
+        # Content moderation for updated text fields
+        update_dict = company_data.model_dump(exclude_unset=True)
+        
+        text_fields = [
+            ("name", update_dict.get("name")),
+            ("description_es", update_dict.get("description_es")),
+            ("description_en", update_dict.get("description_en")), 
+            ("address", update_dict.get("address"))
+        ]
+        
+        for field_name, field_value in text_fields:
+            if field_value:
+                is_safe, error_msg = moderator.check_text_content(field_value)
+                if not is_safe:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Content moderation failed for {field_name}: {error_msg}"
+                    )
+        
+        # Build dynamic UPDATE query
+        if not update_dict:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No fields to update"
+            )
+        
+        set_clauses = []
+        params = []
+        param_count = 0
+        
+        for field, value in update_dict.items():
+            param_count += 1
+            set_clauses.append(f"{field} = ${param_count}")
+            params.append(value)
+        
+        param_count += 1
+        params.append(company_uuid)
+        
+        update_query = f"""
+            UPDATE companies 
+            SET {', '.join(set_clauses)}, updated_at = NOW()
+            WHERE uuid = ${param_count} AND deleted_at IS NULL
+            RETURNING uuid, name, description_es, description_en, 
+                     address, phone, email, image_url, created_at, updated_at
+        """
+        
+        result = await db.fetchrow(update_query, *params)
+        
+        if not result:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Company not found"
+            )
+        
+        # Invalidate caches
+        await invalidate_cache(
+            f"company:{company_uuid}",
+            f"companies:*"
+        )
+        
+        return dict(result)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db_monitor.log_connection_error(e, "update_company")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update company"
+        )
+
+@router.delete("/companies/{company_uuid}",
+              status_code=status.HTTP_204_NO_CONTENT,
+              summary="Delete Company",
+              description="Soft delete a company")
+async def delete_company(
+    company_uuid: UUID,
+    db: asyncpg.Connection = Depends(get_db)
+):
+    """Soft delete company"""
+    
+    try:
+        success = await queries.soft_delete_company(db, company_uuid)
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Company not found"
+            )
+        
+        # Invalidate caches
+        await invalidate_cache(
+            f"company:{company_uuid}",
+            f"companies:*"
+        )
+        
+        return None  # 204 No Content
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db_monitor.log_connection_error(e, "delete_company")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete company"
+        )
+```
+
+### Step 12 - Enhanced Request/Response Models
+```python
+# app/models/requests.py
+from pydantic import BaseModel, EmailStr, Field, validator
+from typing import Optional
+from uuid import UUID
+
+class CompanyCreate(BaseModel):
+    user_uuid: UUID = Field(..., description="User UUID who owns the company")
+    product_uuid: UUID = Field(..., description="Product UUID")
+    commune_uuid: UUID = Field(..., description="Commune UUID")
+    name: str = Field(..., min_length=1, max_length=255, description="Company name")
+    description_es: Optional[str] = Field(None, max_length=2000, description="Spanish description")
+    description_en: Optional[str] = Field(None, max_length=2000, description="English description")
+    address: Optional[str] = Field(None, max_length=500, description="Company address")
+    phone: Optional[str] = Field(None, max_length=20, description="Phone number")
+    email: Optional[EmailStr] = Field(None, description="Email address")
+    image_url: Optional[str] = Field(None, max_length=1000, description="Image URL")
+    
+    @validator('name', 'description_es', 'description_en', 'address')
+    def validate_text_fields(cls, v):
+        if v is not None and isinstance(v, str):
+            # Remove leading/trailing whitespace
+            v = v.strip()
+            if not v:
+                raise ValueError("Field cannot be empty or only whitespace")
+        return v
+    
+    @validator('phone')
+    def validate_phone(cls, v):
+        if v is not None:
+            # Basic phone validation (numbers, spaces, parentheses, plus, dash, ext.)
+            import re
+            if not re.match(r'^[0-9+\-\s()ext.]+, v):
+                raise ValueError("Invalid phone format")
+        return v
+    
+    @validator('image_url')
+    def validate_image_url(cls, v):
+        if v is not None:
+            # Basic URL validation
+            import re
+            url_pattern = re.compile(
+                r'^https?://'  # http:// or https://
+                r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # domain...
+                r'localhost|'  # localhost...
+                r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
+                r'(?::\d+)?'  # optional port
+                r'(?:/?|[/?]\S+), re.IGNORECASE)
+            if not url_pattern.match(v):
+                raise ValueError("Invalid URL format")
+        return v
+
+class CompanyUpdate(BaseModel):
+    product_uuid: Optional[UUID] = None
+    commune_uuid: Optional[UUID] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    description_es: Optional[str] = Field(None, max_length=2000)
+    description_en: Optional[str] = Field(None, max_length=2000)
+    address: Optional[str] = Field(None, max_length=500)
+    phone: Optional[str] = Field(None, max_length=20)
+    email: Optional[EmailStr] = None
+    image_url: Optional[str] = Field(None, max_length=1000)
+    
+    # Use same validators as CompanyCreate
+    _validate_text = validator('name', 'description_es', 'description_en', 'address', allow_reuse=True)(
+        CompanyCreate.validate_text_fields.__func__
+    )
+    _validate_phone = validator('phone', allow_reuse=True)(
+        CompanyCreate.validate_phone.__func__
+    )
+    _validate_image_url = validator('image_url', allow_reuse=True)(
+        CompanyCreate.validate_image_url.__func__
+    )
+
+# app/models/responses.py
+from pydantic import BaseModel, EmailStr
+from typing import Optional, List, Dict, Any
+from uuid import UUID
+from datetime import datetime
+
+class ProductOut(BaseModel):
+    uuid: UUID
+    name_es: str
+    name_en: str
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class CommuneOut(BaseModel):
+    uuid: UUID
+    name: str
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class CompanyOut(BaseModel):
+    uuid: UUID
+    name: str
+    description_es: Optional[str] = None
+    description_en: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    image_url: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class PaginatedResponse(BaseModel):
+    items: List[CompanyOut]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    
+    class Config:
+        from_attributes = True
+
+class HealthCheckResponse(BaseModel):
+    status: str
+    timestamp: str
+    checks: Dict[str, Any]
+    service: Optional[Dict[str, Any]] = None
+
+class ErrorDetail(BaseModel):
+    field: Optional[str] = None
+    message: str
+    code: Optional[str] = None
+
+class ErrorResponse(BaseModel):
+    error: str
+    details: Optional[List[ErrorDetail]] = None
+    timestamp: datetime
+    path: Optional[str] = None
+    correlation_id: Optional[str] = None
+```
+
+## Phase 5: Advanced Security & Middleware
+
+### Step 13 - Enhanced Security Middleware
+```python
+# app/middleware/security.py
+from fastapi import Request, HTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+import time
+import structlog
+from typing import Dict, Set
+from collections import defaultdict, deque
+
+logger = structlog.get_logger()
+
+class RateLimitingMiddleware(BaseHTTPMiddleware):
+    """Rate limiting middleware with sliding window"""
+    
+    def __init__(self, app, requests_per_minute: int = 60, requests_per_hour: int = 1000):
+        super().__init__(app)
+        self.requests_per_minute = requests_per_minute
+        self.requests_per_hour = requests_per_hour
+        self.minute_windows: Dict[str, deque] = defaultdict(deque)
+        self.hour_windows: Dict[str, deque] = defaultdict(deque)
+    
+    async def dispatch(self, request: Request, call_next):
+        client_ip = self._get_client_ip(request)
+        current_time = time.time()
+        
+        # Clean old entries and check limits
+        if self._is_rate_limited(client_ip, current_time):
+            logger.warning("Rate limit exceeded", client_ip=client_ip)
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded",
+                headers={"Retry-After": "60"}
+            )
+        
+        # Record this request
+        self.minute_windows[client_ip].append(current_time)
+        self.hour_windows[client_ip].append(current_time)
+        
+        response = await call_next(request)
+        
+        # Add rate limit headers
+        response.headers["X-RateLimit-Limit-Minute"] = str(self.requests_per_minute)
+        response.headers["X-RateLimit-Limit-Hour"] = str(self.requests_per_hour)
+        response.headers["X-RateLimit-Remaining-Minute"] = str(
+            max(0, self.requests_per_minute - len(self.minute_windows[client_ip]))
+        )
+        
+        return response
+    
+    def _get_client_ip(self, request: Request) -> str:
+        # Check for forwarded headers (from load balancer/proxy)
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        if forwarded_for:
+            return forwarded_for.split(",")[0].strip()
+        
+        forwarded = request.headers.get("X-Forwarded")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        
+        real_ip = request.headers.get("X-Real-IP")
+        if real_ip:
+            return real_ip
+        
+        return request.client.host if request.client else "unknown"
+    
+    def _is_rate_limited(self, client_ip: str, current_time: float) -> bool:
+        minute_cutoff = current_time - 60
+        hour_cutoff = current_time - 3600
+        
+        # Clean old entries for minute window
+        minute_window = self.minute_windows[client_ip]
+        while minute_window and minute_window[0] < minute_cutoff:
+            minute_window.popleft()
+        
+        # Clean old entries for hour window
+        hour_window = self.hour_windows[client_ip]
+        while hour_window and hour_window[0] < hour_cutoff:
+            hour_window.popleft()
+        
+        # Check limits
+        return (len(minute_window) >= self.requests_per_minute or 
+                len(hour_window) >= self.requests_per_hour)
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add comprehensive security headers"""
+    
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        
+        # Security headers
+        security_headers = {
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "X-XSS-Protection": "1; mode=block",
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+            "Content-Security-Policy": (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: https:; "
+                "font-src 'self'; "
+                "connect-src 'self'; "
+                "frame-ancestors 'none';"
+            ),
+            "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
+            "Permissions-Policy": (
+                "accelerometer=(), "
+                "camera=(), "
+                "geolocation=(), "
+                "gyroscope=(), "
+                "magnetometer=(), "
+                "microphone=(), "
+                "payment=(), "
+                "usb=()"
+            ),
+        }
+        
+        for header, value in security_headers.items():
+            response.headers[header] = value
+        
+        return response
+
+class RequestValidationMiddleware(BaseHTTPMiddleware):
+    """Validate request size and content"""
+    
+    def __init__(self, app, max_request_size: int = 10 * 1024 * 1024):  # 10MB
+        super().__init__(app)
+        self.max_request_size = max_request_size
+        self.suspicious_patterns = [
+            # Common attack patterns
+            b"<script",
+            b"javascript:",
+            b"vbscript:",
+            b"onload=",
+            b"onerror=",
+            b"eval(",
+            b"expression(",
+            # SQL injection patterns
+            b"union select",
+            b"drop table",
+            b"insert into",
+            b"delete from",
+            # Command injection
+            b"system(",
+            b"exec(",
+            b"shell_exec",
+            # Path traversal
+            b"../",
+            b"..\\",
+        ]
+    
+    async def dispatch(self, request: Request, call_next):
+        # Check request size
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > self.max_request_size:
+            logger.warning("Request too large", size=content_length)
+            raise HTTPException(413, "Request entity too large")
+        
+        # For POST/PUT requests, scan body for suspicious content
+        if request.method in ["POST", "PUT", "PATCH"]:
+            body = await request.body()
+            
+            if self._contains_suspicious_content(body):
+                logger.warning("Suspicious request content detected", 
+                             method=request.method, 
+                             url=str(request.url))
+                raise HTTPException(400, "Invalid request content")
+            
+            # Recreate request with body for downstream processing
+            async def receive():
+                return {"type": "http.request", "body": body, "more_body": False}
+            
+            request._receive = receive
+        
+        return await call_next(request)
+    
+    def _contains_suspicious_content(self, body: bytes) -> bool:
+        body_lower = body.lower()
+        return any(pattern in body_lower for pattern in self.suspicious_patterns)
+```
+
+### Step 14 - Enhanced Error Handling
+```python
+# app/middleware/error_handling.py
+from fastapi import Request, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.middleware.base import BaseHTTPMiddleware
+import structlog
+from datetime import datetime
+from typing import Union
+from pydantic import ValidationError
+import asyncpg
+from app.models.responses import ErrorResponse, ErrorDetail
+
+logger = structlog.get_logger()
+
+class ErrorHandlingMiddleware(BaseHTTPMiddleware):
+    """Centralized error handling and logging"""
+    
+    async def dispatch(self, request: Request, call_next):
+        try:
+            return await call_next(request)
+        except Exception as exc:
+            return await self.handle_exception(request, exc)
+    
+    async def handle_exception(self, request: Request, exc: Exception) -> JSONResponse:
+        """Handle different types of exceptions with appropriate responses"""
+        
+        correlation_id = getattr(request.state, 'correlation_id', None)
+        
+        # HTTP Exceptions (from FastAPI)
+        if isinstance(exc, HTTPException):
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={
+                    "error": exc.detail,
+                    "timestamp": datetime.now().isoformat(),
+                    "path": str(request.url.path),
+                    "correlation_id": correlation_id
+                }
+            )
+        
+        # Validation Errors (from Pydantic)
+        elif isinstance(exc, (RequestValidationError, ValidationError)):
+            errors = []
+            for error in exc.errors():
+                errors.append(ErrorDetail(
+                    field=".".join(str(loc) for loc in error["loc"]),
+                    message=error["msg"],
+                    code=error["type"]
+                ))
+            
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": "Validation failed",
+                    "details": [error.dict() for error in errors],
+                    "timestamp": datetime.now().isoformat(),
+                    "path": str(request.url.path),
+                    "correlation_id": correlation_id
+                }
+            )
+        
+        # Database Errors
+        elif isinstance(exc, asyncpg.PostgresError):
+            logger.error("Database error", 
+                        error_code=exc.sqlstate,
+                        error_message=str(exc),
+                        correlation_id=correlation_id)
+            
+            # Map specific database errors to HTTP status codes
+            if isinstance(exc, asyncpg.UniqueViolationError):
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "Resource already exists",
+                        "timestamp": datetime.now().isoformat(),
+                        "path": str(request.url.path),
+                        "correlation_id": correlation_id
+                    }
+                )
+            elif isinstance(exc, asyncpg.ForeignKeyViolationError):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "Referenced resource not found",
+                        "timestamp": datetime.now().isoformat(),
+                        "path": str(request.url.path),
+                        "correlation_id": correlation_id
+                    }
+                )
+            elif isinstance(exc, asyncpg.NotNullViolationError):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "Required field missing",
+                        "timestamp": datetime.now().isoformat(),
+                        "path": str(request.url.path),
+                        "correlation_id": correlation_id
+                    }
+                )
+            else:
+                # Generic database error
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "Database operation failed",
+                        "timestamp": datetime.now().isoformat(),
+                        "path": str(request.url.path),
+                        "correlation_id": correlation_id
+                    }
+                )
+        
+        # Generic server errors
+        else:
+            logger.error("Unhandled exception",
+                        exception=str(exc),
+                        exception_type=type(exc).__name__,
+                        correlation_id=correlation_id,
+                        path=str(request.url.path))
+            
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": "Internal server error",
+                    "timestamp": datetime.now().isoformat(),
+                    "path": str(request.url.path),
+                    "correlation_id": correlation_id
+                }
+            )
+```
+
+## Phase 6: Production Deployment
+
+### Step 15 - Production Main Application
+```python
+# app/main.py
+import structlog
+import sys
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from contextlib import asynccontextmanager
+from typing import Dict, Any
+
+from app.config import settings
+from app.database.connection import init_db_pools, close_db_pools
+from app.cache.redis_client import init_redis, close_redis
+from app.middleware.logging import LoggingMiddleware
+from app.middleware.security import (
+    SecurityHeadersMiddleware, 
+    RateLimitingMiddleware, 
+    RequestValidationMiddleware
+)
+from app.middleware.error_handling import ErrorHandlingMiddleware
+from app.api.v1.router import api_router
+
+# Configure structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.ConsoleRenderer() if settings.debug else structlog.processors.JSONRenderer()
+    ],
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
+    context_class=dict,
+    level="DEBUG" if settings.debug else "INFO"
+)
+
+logger = structlog.get_logger()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan events"""
+    # Startup
+    logger.info("Starting application", service=settings.project_name)
+    
+    try:
+        await init_db_pools()
+        await init_redis()
+        logger.info("All services initialized successfully")
+    except Exception as e:
+        logger.error("Failed to initialize services", error=str(e))
+        sys.exit(1)
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down application")
+    await close_db_pools()
+    await close_redis()
+    logger.info("Application shutdown complete")
+
+# Create FastAPI app
+app = FastAPI(
+    title=settings.project_name,
+    version="1.0.0",
+    description="Production-ready FastAPI application with PostgreSQL",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.debug else None,
+    redoc_url="/redoc" if settings.debug else None,
+    openapi_url="/openapi.json" if settings.debug else None
+)
+
+# Middleware stack (order matters!)
+# 1. Error handling (should be first to catch all errors)
+app.add_middleware(ErrorHandlingMiddleware)
+
+# 2. Security middleware
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestValidationMiddleware, max_request_size=settings.max_file_size)
+
+# 3. Rate limiting (after security checks)
+if not settings.debug:  # Disable rate limiting in development
+    app.add_middleware(RateLimitingMiddleware, requests_per_minute=100, requests_per_hour=2000)
+
+# 4. Logging middleware
+app.add_middleware(LoggingMiddleware)
+
+# 5. Compression middleware
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# 6. Trusted host middleware (security)
+trusted_hosts = ["localhost", "127.0.0.1"]
+if not settings.debug:
+    trusted_hosts.extend(["*.yourdomain.com", "yourdomain.com"])
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
+
+# 7. CORS middleware (should be last)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["X-Correlation-ID", "X-RateLimit-*"]
+)
+
+# Include API routes
+app.include_router(api_router, prefix=settings.api_v1_prefix)
+
+# Root endpoint
+@app.get("/", tags=["Root"])
+async def root():
+    """Root endpoint with basic service info"""
+    return {
+        "message": f"{settings.project_name} API is running",
+        "version": "1.0.0",
+        "docs_url": "/docs" if settings.debug else "Contact administrator for API documentation",
+        "health_check": "/api/v1/health"
+    }
+
+# Global exception handlers for specific cases
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Custom validation error handler"""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "Validation failed",
+            "details": exc.errors(),
+            "timestamp": structlog.get_logger().info("Validation error", errors=exc.errors())
+        },
+    )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=settings.debug,
+        log_config=None,  # Use structlog instead
+        access_log=False   # Handled by LoggingMiddleware
+    )
+```
+
+### Step 16 - Production Docker Configuration
+```dockerfile
+# Dockerfile
+FROM python:3.11-slim as builder
+
+# Install system dependencies for building
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    libmagic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# Production stage
+FROM python:3.11-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libpq5 \
+    libmagic1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy Python packages from builder
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+
+# Copy application code
+COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini .
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash --uid 1001 appuser
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+
+EXPOSE 8000
+
+# Use gunicorn for production
+CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "120", "--keepalive", "5", "--max-requests", "1000", "--max-requests-jitter", "100"]
+```
+
+### Step 17 - Production Docker Compose
+```yaml
+# docker-compose.prod.yml
+version: '3.8'
+
+services:
+  api:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://demo_user:${DB_PASSWORD}@postgres:5432/demo_db
+      - REDIS_URL=redis://redis:6379
+      - SECRET_KEY=${SECRET_KEY}
+      - DEBUG=false
+      - ALLOWED_ORIGINS=["https://yourdomain.com"]
+      - DB_SSL_MODE=require
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=demo_db
+      - POSTGRES_USER=demo_user
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo_user -d demo_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    command: >
+      postgres 
+      -c max_connections=100
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.7
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=4MB
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
+      -c log_statement=all
+      -c log_min_duration_statement=1000
+      -c ssl=on
+      -c ssl_cert_file=/var/lib/postgresql/server.crt
+      -c ssl_key_file=/var/lib/postgresql/server.key
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./config/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    command: redis-server /usr/local/etc/redis/redis.conf
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/ssl:/etc/ssl:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  default:
+    name: demo_network
+```
+
+### Step 18 - Database Initialization Script
+```sql
+-- scripts/init-db.sql
+-- Database initialization with security settings
+
+-- Create read-only user for read replicas
+CREATE USER demo_readonly WITH PASSWORD 'readonly_password';
+GRANT CONNECT ON DATABASE demo_db TO demo_readonly;
+GRANT USAGE ON SCHEMA public TO demo_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO demo_readonly;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO demo_readonly;
+
+-- Create monitoring user
+CREATE USER demo_monitor WITH PASSWORD 'monitor_password';
+GRANT CONNECT ON DATABASE demo_db TO demo_monitor;
+GRANT USAGE ON SCHEMA public TO demo_monitor;
+GRANT SELECT ON pg_stat_database, pg_stat_user_tables, pg_stat_activity TO demo_monitor;
+
+-- Set connection limits
+ALTER USER demo_user CONNECTION LIMIT 50;
+ALTER USER demo_readonly CONNECTION LIMIT 20;
+ALTER USER demo_monitor CONNECTION LIMIT 5;
+
+-- Configure database settings for performance
+ALTER DATABASE demo_db SET timezone TO 'UTC';
+ALTER DATABASE demo_db SET default_text_search_config TO 'spanish';
+
+-- Create custom functions for monitoring
+CREATE OR REPLACE FUNCTION public.database_size_pretty()
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+AS $
+  SELECT pg_size_pretty(pg_database_size(current_database()));
+$;
+
+GRANT EXECUTE ON FUNCTION public.database_size_pretty() TO demo_monitor;
+```
+
+### Step 19 - Production Configuration Files
+```nginx
+# config/nginx.conf
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream api_backend {
+        server api:8000 max_fails=3 fail_timeout=30s;
+    }
+
+    # Rate limiting
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=health_limit:1m rate=1r/s;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    server {
+        listen 80;
+        server_name yourdomain.com;
+        return 301 https://$server_name$request_uri;
+    }
+
+    server {
+        listen 443 ssl http2;
+        server_name yourdomain.com;
+
+        # SSL Configuration
+        ssl_certificate /etc/ssl/certs/server.crt;
+        ssl_certificate_key /etc/ssl/private/server.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+        ssl_prefer_server_ciphers off;
+
+        # Health check endpoint (less restrictive)
+        location /api/v1/health {
+            limit_req zone=health_limit burst=5 nodelay;
+            proxy_pass http://api_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # API endpoints
+        location /api/ {
+            limit_req zone=api_limit burst=20 nodelay;
+            
+            # CORS headers
+            add_header Access-Control-Allow-Origin "https://yourdomain.com" always;
+            add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+            add_header Access-Control-Allow-Headers "Authorization, Content-Type" always;
+
+            # Handle preflight requests
+            if ($request_method = OPTIONS) {
+                return 204;
+            }
+
+            proxy_pass http://api_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # Timeouts
+            proxy_connect_timeout 30s;
+            proxy_send_timeout 30s;
+            proxy_read_timeout 30s;
+        }
+
+        # Static files (if any)
+        location /static/ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+
+        # Block sensitive paths
+        location ~ /\.(env|git|svn) {
+            deny all;
+            return 404;
+        }
+    }
+}
+```
+
+```redis
+# config/redis.conf
+# Redis production configuration
+
+# Network
+bind 127.0.0.1
+protected-mode yes
+port 6379
+
+# Security
+requirepass your_redis_password
+
+# Memory management
+maxmemory 256mb
+maxmemory-policy allkeys-lru
+
+# Persistence
+save 900 1
+save 300 10
+save 60 10000
+rdbcompression yes
+rdbchecksum yes
+
+# Logging
+loglevel notice
+logfile ""
+
+# Performance
+tcp-keepalive 300
+timeout 300
+
+# Disable dangerous commands
+rename-command FLUSHDB ""
+rename-command FLUSHALL ""
+rename-command KEYS ""
+rename-command CONFIG ""
+rename-command SHUTDOWN SHUTDOWN_b8f2e9c4a47d
+```
+
+## Phase 7: Deployment Scripts & Monitoring
+
+### Step 20 - Production Deployment Scripts
+```bash
+#!/bin/bash
+# scripts/deploy.sh
+set -euo pipefail
+
+# Configuration
+DOCKER_COMPOSE_FILE="docker-compose.prod.yml"
+BACKUP_DIR="/backups/$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="/var/log/deployment.log"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+log() {
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a "$LOG_FILE"
+}
+
+error() {
+    echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ERROR:${NC} $1" | tee -a "$LOG_FILE"
+}
+
+warn() {
+    echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] WARNING:${NC} $1" | tee -a "$LOG_FILE"
+}
+
+# Pre-deployment checks
+check_requirements() {
+    log "🔍 Checking deployment requirements..."
+    
+    # Check if required environment variables are set
+    required_vars=("DB_PASSWORD" "SECRET_KEY" "REDIS_PASSWORD")
+    for var in "${required_vars[@]}"; do
+        if [[ -z "${!var:-}" ]]; then
+            error "Required environment variable $var is not set"
+            exit 1
+        fi
+    done
+    
+    # Check if Docker and Docker Compose are available
+    if ! command -v docker &> /dev/null; then
+        error "Docker is not installed or not in PATH"
+        exit 1
+    fi
+    
+    if ! command -v docker-compose &> /dev/null; then
+        error "Docker Compose is not installed or not in PATH"
+        exit 1
+    fi
+    
+    log "✅ All requirements met"
+}
+
+# Database backup
+backup_database() {
+    log "📦 Creating database backup..."
+    
+    mkdir -p "$BACKUP_DIR"
+    
+    # Create database backup
+    docker-compose -f "$DOCKER_COMPOSE_FILE" exec -T postgres pg_dump \
+        -U demo_user -d demo_db --no-password > "$BACKUP_DIR/database.sql"
+    
+    if [[ $? -eq 0 ]]; then
+        log "✅ Database backup created: $BACKUP_DIR/database.sql"
+    else
+        error "Failed to create database backup"
+        exit 1
+    fi
+}
+
+# Health check function
+health_check() {
+    log "🏥 Performing health check..."
+    
+    local max_attempts=30
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        if curl -f -s http://localhost:8000/api/v1/health > /dev/null; then
+            log "✅ Health check passed"
+            return 0
+        fi
+        
+        log "Health check attempt $attempt/$max_attempts failed, retrying in 10s..."
+        sleep 10
+        ((attempt++))
+    done
+    
+    error "Health check failed after $max_attempts attempts"
+    return 1
+}
+
+# Rollback function
+rollback() {
+    error "🔄 Performing rollback..."
+    
+    # Stop current containers
+    docker-compose -f "$DOCKER_COMPOSE_FILE" down
+    
+    # Restore database from backup
+    if [[ -f "$BACKUP_DIR/database.sql" ]]; then
+        log "Restoring database from backup..."
+        docker-compose -f "$DOCKER_COMPOSE_FILE" up -d postgres
+        sleep 30
+        docker-compose -f "$DOCKER_COMPOSE_FILE" exec -T postgres psql \
+            -U demo_user -d demo_db --no-password < "$BACKUP_DIR/database.sql"
+    fi
+    
+    # Start services with previous version
+    docker-compose -f "$DOCKER_COMPOSE_FILE" up -d
+    
+    error "Rollback completed"
+    exit 1
+}
+
+# Main deployment function
+deploy() {
+    log "🚀 Starting deployment..."
+    
+    # Pull latest code
+    log "Pulling latest code..."
+    git pull origin main
+    
+    # Build new images
+    log "Building Docker images..."
+    docker-compose -f "$DOCKER_COMPOSE_FILE" build --no-cache
+    
+    # Stop old containers (but keep data)
+    log "Stopping old containers..."
+    docker-compose -f "$DOCKER_COMPOSE_FILE" down --remove-orphans
+    
+    # Start new containers
+    log "Starting new containers..."
+    docker-compose -f "$DOCKER_COMPOSE_FILE" up -d
+    
+    # Wait for services to start
+    log "Waiting for services to start..."
+    sleep 30
+    
+    # Run database migrations
+    log "Running database migrations..."
+    docker-compose -f "$DOCKER_COMPOSE_FILE" exec -T api alembic upgrade head
+    
+    # Perform health check
+    if ! health_check; then
+        rollback
+    fi
+    
+    # Clean up old Docker images
+    log "Cleaning up old Docker images..."
+    docker image prune -f
+    
+    log "✅ Deployment completed successfully!"
+}
+
+# Trap to handle failures
+trap rollback ERR
+
+# Main execution
+main() {
+    log "Starting deployment process..."
+    
+    check_requirements
+    backup_database
+    deploy
+    
+    log "🎉 Deployment process completed successfully!"
+}
+
+main "$@"
+```
+
+```bash
+#!/bin/bash
+# scripts/db_health_check.sh
+set -euo pipefail
+
+# Database health monitoring script
+DB_HOST=${DB_HOST:-localhost}
+DB_PORT=${DB_PORT:-5432}
+DB_USER=${DB_USER:-demo_user}
+DB_NAME=${DB_NAME:-demo_db}
+
+# Thresholds
+MAX_CONNECTIONS_PERCENT=80
+MAX_LONG_QUERIES=5
+MAX_LOCKS=10
+
+check_connectivity() {
+    echo "Checking database connectivity..."
+    if pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" > /dev/null 2>&1; then
+        echo "✅ Database is reachable"
+        return 0
+    else
+        echo "❌ Database is not reachable"
+        return 1
+    fi
+}
+
+check_connections() {
+    echo "Checking connection usage..."
+    
+    local query="SELECT 
+        (SELECT count(*) FROM pg_stat_activity) as current_connections,
+        (SELECT setting::int FROM pg_settings WHERE name='max_connections') as max_connections"
+    
+    local result=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -c "$query")
+    local current=$(echo "$result" | awk '{print $1}')
+    local max=$(echo "$result" | awk '{print $3}')
+    local percentage=$((current * 100 / max))
+    
+    echo "Current connections: $current/$max ($percentage%)"
+    
+    if [[ $percentage -gt $MAX_CONNECTIONS_PERCENT ]]; then
+        echo "⚠️  High connection usage: $percentage%"
+        return 1
+    else
+        echo "✅ Connection usage is normal"
+        return 0
+    fi
+}
+
+check_long_queries() {
+    echo "Checking for long-running queries..."
+    
+    local query="SELECT count(*) FROM pg_stat_activity 
+        WHERE state = 'active' 
+        AND (now() - query_start) > interval '30 seconds'
+        AND pid != pg_backend_pid()"
+    
+    local count=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -c "$query")
+    
+    echo "Long-running queries: $count"
+    
+    if [[ $count -gt $MAX_LONG_QUERIES ]]; then
+        echo "⚠️  Too many long-running queries: $count"
+        return 1
+    else
+        echo "✅ Long-running queries within limits"
+        return 0
+    fi
+}
+
+check_locks() {
+    echo "Checking for database locks..."
+    
+    local query="SELECT count(*) FROM pg_locks 
+        WHERE NOT granted"
+    
+    local count=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -c "$query")
+    
+    echo "Waiting locks: $count"
+    
+    if [[ $count -gt $MAX_LOCKS ]]; then
+        echo "⚠️  Too many waiting locks: $count"
+        return 1
+    else
+        echo "✅ Database locks within limits"
+        return 0
+    fi
+}
+
+main() {
+    echo "🏥 Database Health Check - $(date)"
+    echo "=================================="
+    
+    local exit_code=0
+    
+    check_connectivity || exit_code=1
+    check_connections || exit_code=1
+    check_long_queries || exit_code=1
+    check_locks || exit_code=1
+    
+    echo "=================================="
+    
+    if [[ $exit_code -eq 0 ]]; then
+        echo "✅ All database health checks passed"
+    else
+        echo "❌ Some database health checks failed"
+    fi
+    
+    return $exit_code
+}
+
+main "$@"
+```
+
+### Step 21 - Monitoring and Logging Setup
+```python
+# scripts/monitoring.py
+import asyncio
+import asyncpg
+import aioredis
+import psutil
+import json
+import sys
+from datetime import datetime, timedelta
+from typing import Dict, Any, List
+import structlog
+
+# Configure logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.JSONRenderer()
+    ],
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+)
+
+logger = structlog.get_logger()
+
+class SystemMonitor:
+    def __init__(self, db_url: str, redis_url: str):
+        self.db_url = db_url
+        self.redis_url = redis_url
+        self.alerts = []
+    
+    async def check_database_health(self) -> Dict[str, Any]:
+        """Check database health metrics"""
+        try:
+            conn = await asyncpg.connect(self.db_url)
+            
+            # Basic connectivity
+            await conn.fetchval("SELECT 1")
+            
+            # Connection stats
+            connection_stats = await conn.fetchrow("""
+                SELECT 
+                    (SELECT count(*) FROM pg_stat_activity WHERE state = 'active') as active_connections,
+                    (SELECT count(*) FROM pg_stat_activity WHERE state = 'idle') as idle_connections,
+                    (SELECT setting::int FROM pg_settings WHERE name='max_connections') as max_connections
+            """)
+            
+            # Database size
+            db_size = await conn.fetchval("SELECT pg_database_size(current_database())")
+            
+            # Table statistics
+            table_stats = await conn.fetch("""
+                SELECT 
+                    schemaname, tablename, n_live_tup, n_dead_tup,
+                    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as table_size
+                FROM pg_stat_user_tables 
+                ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC
+                LIMIT 10
+            """)
+            
+            # Long running queries
+            long_queries = await conn.fetch("""
+                SELECT 
+                    pid, usename, query_start, 
+                    now() - query_start as duration,
+                    left(query, 100) as query_preview
+                FROM pg_stat_activity 
+                WHERE state = 'active' 
+                AND (now() - query_start) > interval '30 seconds'
+                AND pid != pg_backend_pid()
+                ORDER BY query_start
+            """)
+            
+            await conn.close()
+            
+            return {
+                "status": "healthy",
+                "connection_stats": dict(connection_stats),
+                "database_size_bytes": db_size,
+                "database_size_pretty": self._format_bytes(db_size),
+                "table_stats": [dict(row) for row in table_stats],
+                "long_running_queries": [dict(row) for row in long_queries],
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error("Database health check failed", error=str(e))
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    async def check_redis_health(self) -> Dict[str, Any]:
+        """Check Redis health metrics"""
+        try:
+            redis = aioredis.from_url(self.redis_url)
+            
+            # Basic connectivity
+            await redis.ping()
+            
+            # Redis info
+            info = await redis.info()
+            
+            await redis.close()
+            
+            return {
+                "status": "healthy",
+                "memory_used_bytes": info.get("used_memory", 0),
+                "memory_used_pretty": self._format_bytes(info.get("used_memory", 0)),
+                "connected_clients": info.get("connected_clients", 0),
+                "total_commands_processed": info.get("total_commands_processed", 0),
+                "keyspace_hits": info.get("keyspace_hits", 0),
+                "keyspace_misses": info.get("keyspace_misses", 0),
+                "uptime_seconds": info.get("uptime_in_seconds", 0),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error("Redis health check failed", error=str(e))
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    def check_system_health(self) -> Dict[str, Any]:
+        """Check system resource metrics"""
+        try:
+            # CPU usage
+            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_count = psutil.cpu_count()
+            
+            # Memory usage
+            memory = psutil.virtual_memory()
+            
+            # Disk usage
+            disk = psutil.disk_usage('/')
+            
+            # Network stats
+            network = psutil.net_io_counters()
+            
+            return {
+                "status": "healthy",
+                "cpu": {
+                    "percent": cpu_percent,
+                    "count": cpu_count
+                },
+                "memory": {
+                    "total_bytes": memory.total,
+                    "used_bytes": memory.used,
+                    "available_bytes": memory.available,
+                    "percent": memory.percent,
+                    "total_pretty": self._format_bytes(memory.total),
+                    "used_pretty": self._format_bytes(memory.used),
+                    "available_pretty": self._format_bytes(memory.available)
+                },
+                "disk": {
+                    "total_bytes": disk.total,
+                    "used_bytes": disk.used,
+                    "free_bytes": disk.free,
+                    "percent": (disk.used / disk.total) * 100,
+                    "total_pretty": self._format_bytes(disk.total),
+                    "used_pretty": self._format_bytes(disk.used),
+                    "free_pretty": self._format_bytes(disk.free)
+                },
+                "network": {
+                    "bytes_sent": network.bytes_sent,
+                    "bytes_recv": network.bytes_recv,
+                    "packets_sent": network.packets_sent,
+                    "packets_recv": network.packets_recv
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error("System health check failed", error=str(e))
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    def _format_bytes(self, bytes_value: int) -> str:
+        """Format bytes to human readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if bytes_value < 1024.0:
+                return f"{bytes_value:.2f} {unit}"
+            bytes_value /= 1024.0
+        return f"{bytes_value:.2f} PB"
+    
+    def _check_thresholds(self, metrics: Dict[str, Any]) -> List[str]:
+        """Check if any metrics exceed warning thresholds"""
+        alerts = []
+        
+        # Database alerts
+        if "database" in metrics and metrics["database"]["status"] == "healthy":
+            db_stats = metrics["database"]["connection_stats"]
+            connection_percent = (db_stats["active_connections"] / db_stats["max_connections"]) * 100
+            
+            if connection_percent > 80:
+                alerts.append(f"High database connection usage: {connection_percent:.1f}%")
+            
+            if len(metrics["database"]["long_running_queries"]) > 5:
+                alerts.append(f"Too many long-running queries: {len(metrics['database']['long_running_queries'])}")
+        
+        # System alerts
+        if "system" in metrics and metrics["system"]["status"] == "healthy":
+            sys_stats = metrics["system"]
+            
+            if sys_stats["cpu"]["percent"] > 80:
+                alerts.append(f"High CPU usage: {sys_stats['cpu']['percent']}%")
+            
+            if sys_stats["memory"]["percent"] > 85:
+                alerts.append(f"High memory usage: {sys_stats['memory']['percent']}%")
+            
+            if sys_stats["disk"]["percent"] > 90:
+                alerts.append(f"High disk usage: {sys_stats['disk']['percent']:.1f}%")
+        
+        return alerts
+    
+    async def run_health_check(self) -> Dict[str, Any]:
+        """Run complete health check"""
+        logger.info("Starting health check")
+        
+        # Run all checks concurrently
+        db_health_task = asyncio.create_task(self.check_database_health())
+        redis_health_task = asyncio.create_task(self.check_redis_health())
+        system_health = self.check_system_health()
+        
+        db_health = await db_health_task
+        redis_health = await redis_health_task
+        
+        metrics = {
+            "database": db_health,
+            "redis": redis_health,
+            "system": system_health,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Check for alerts
+        alerts = self._check_thresholds(metrics)
+        metrics["alerts"] = alerts
+        
+        # Overall status
+        overall_status = "healthy"
+        if (db_health["status"] != "healthy" or 
+            redis_health["status"] != "healthy" or 
+            system_health["status"] != "healthy"):
+            overall_status = "unhealthy"
+        elif alerts:
+            overall_status = "warning"
+        
+        metrics["overall_status"] = overall_status
+        
+        # Log results
+        if overall_status == "healthy":
+            logger.info("Health check completed", status=overall_status)
+        elif overall_status == "warning":
+            logger.warning("Health check completed with warnings", 
+                          status=overall_status, alerts=alerts)
+        else:
+            logger.error("Health check failed", status=overall_status)
+        
+        return metrics
+
+async def main():
+    import os
+    
+    db_url = os.getenv("DATABASE_URL", "postgresql://demo_user:demo123@localhost:5432/demo_db")
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    
+    monitor = SystemMonitor(db_url, redis_url)
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "--continuous":
+        # Continuous monitoring mode
+        while True:
+            try:
+                metrics = await monitor.run_health_check()
+                print(json.dumps(metrics, indent=2))
+                
+                # Sleep for 30 seconds between checks
+                await asyncio.sleep(30)
+                
+            except KeyboardInterrupt:
+                logger.info("Monitoring stopped by user")
+                break
+            except Exception as e:
+                logger.error("Monitoring error", error=str(e))
+                await asyncio.sleep(60)  # Wait longer on errors
+    else:
+        # Single check mode
+        metrics = await monitor.run_health_check()
+        print(json.dumps(metrics, indent=2))
+        
+        # Exit with error code if unhealthy
+        if metrics["overall_status"] == "unhealthy":
+            sys.exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Step 22 - Final Makefile with All Operations
+```makefile
+# Makefile - Production-ready operations
+.PHONY: help install dev test lint format migrate run docker-build docker-run deploy monitor backup restore
+
+# Colors
+BLUE=\033[0;34m
+GREEN=\033[0;32m
+RED=\033[0;31m
+NC=\033[0m # No Color
+
+help: ## Show this help message
+	@echo "Available commands:"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "$(BLUE)%-15s$(NC) %s\n", $1, $2}'
+
+install: ## Install production dependencies
+	@echo "$(GREEN)Installing production dependencies...$(NC)"
+	pip install -r requirements.txt
+
+dev: ## Install development dependencies and setup pre-commit
+	@echo "$(GREEN)Setting up development environment...$(NC)"
+	pip install -r requirements-dev.txt
+	pre-commit install
+	@echo "$(GREEN)Development environment ready!$(NC)"
+
+test: ## Run all tests
+	@echo "$(GREEN)Running tests...$(NC)"
+	pytest app/tests/ -v --cov=app --cov-report=html --cov-report=term-missing
+
+test-db: ## Run database-specific tests
+	@echo "$(GREEN)Running database tests...$(NC)"
+	pytest app/tests/test_database.py app/tests/test_transactions.py -v
+
+lint: ## Run linting tools
+	@echo "$(GREEN)Running linting tools...$(NC)"
+	flake8 app/
+	mypy app/
+	@echo "$(GREEN)Linting completed!$(NC)"
+
+format: ## Format code with black and isort
+	@echo "$(GREEN)Formatting code...$(NC)"
+	black app/
+	isort app/
+	@echo "$(GREEN)Code formatted!$(NC)"
+
+migrate: ## Run database migrations
+	@echo "$(GREEN)Running database migrations...$(NC)"
+	alembic upgrade head
+	@echo "$(GREEN)Migrations completed!$(NC)"
+
+migrate-create: ## Create new migration (usage: make migrate-create MESSAGE="description")
+	@echo "$(GREEN)Creating new migration...$(NC)"
+	alembic revision --autogenerate -m "$(MESSAGE)"
+
+migrate-rollback: ## Rollback last migration
+	@echo "$(RED)Rolling back last migration...$(NC)"
+	alembic downgrade -1
+
+run-dev: ## Run development server with auto-reload
+	@echo "$(GREEN)Starting development server...$(NC)"
+	uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --log-level debug
+
+run-prod: ## Run production server with gunicorn
+	@echo "$(GREEN)Starting production server...$(NC)"
+	gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+
+docker-build: ## Build Docker images
+	@echo "$(GREEN)Building Docker images...$(NC)"
+	docker-compose -f docker-compose.prod.yml build --no-cache
+
+docker-run: ## Run with Docker Compose
+	@echo "$(GREEN)Starting services with Docker Compose...$(NC)"
+	docker-compose -f docker-compose.prod.yml up -d
+
+docker-logs: ## View Docker Compose logs
+	docker-compose -f docker-compose.prod.yml logs -f
+
+docker-stop: ## Stop Docker Compose services
+	@echo "$(RED)Stopping Docker services...$(NC)"
+	docker-compose -f docker-compose.prod.yml down
+
+docker-clean: ## Clean up Docker resources
+	@echo "$(RED)Cleaning up Docker resources...$(NC)"
+	docker-compose -f docker-compose.prod.yml down -v --remove-orphans
+	docker system prune -f
+
+deploy: ## Deploy to production
+	@echo "$(GREEN)Deploying to production...$(NC)"
+	./scripts/deploy.sh
+
+monitor: ## Run system monitoring
+	@echo "$(GREEN)Running system monitoring...$(NC)"
+	python scripts/monitoring.py
+
+monitor-continuous: ## Run continuous monitoring
+	@echo "$(GREEN)Starting continuous monitoring...$(NC)"
+	python scripts/monitoring.py --continuous
+
+db-health: ## Check database health
+	@echo "$(GREEN)Checking database health...$(NC)"
+	./scripts/db_health_check.sh
+
+backup: ## Create database backup
+	@echo "$(GREEN)Creating database backup...$(NC)"
+	mkdir -p backups/
+	docker-compose -f docker-compose.prod.yml exec -T postgres pg_dump \
+		-U demo_user -d demo_db --no-password > backups/backup_$(shell date +%Y%m%d_%H%M%S).sql
+	@echo "$(GREEN)Backup created in backups/ directory$(NC)"
+
+restore: ## Restore database from backup (usage: make restore BACKUP_FILE=backup.sql)
+	@echo "$(RED)Restoring database from $(BACKUP_FILE)...$(NC)"
+	@if [ -z "$(BACKUP_FILE)" ]; then echo "$(RED)Please specify BACKUP_FILE$(NC)"; exit 1; fi
+	docker-compose -f docker-compose.prod.yml exec -T postgres psql \
+		-U demo_user -d demo_db --no-password < $(BACKUP_FILE)
+	@echo "$(GREEN)Database restored!$(NC)"
+
+security-scan: ## Run security vulnerability scan
+	@echo "$(GREEN)Running security scan...$(NC)"
+	safety check -r requirements.txt
+	bandit -r app/
+
+load-test: ## Run load testing with locust
+	@echo "$(GREEN)Starting load test...$(NC)"
+	locust -f app/tests/locustfile.py --host=http://localhost:8000
+
+ssl-cert: ## Generate self-signed SSL certificate for development
+	@echo "$(GREEN)Generating SSL certificate...$(NC)"
+	mkdir -p config/ssl
+	openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+		-keyout config/ssl/server.key -out config/ssl/server.crt \
+		-subj "/C=US/ST=State/L=City/O=Organization/CN=localhost"
+
+env-example: ## Create .env file from example
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
+		echo "$(GREEN).env file created from example. Please edit with your values.$(NC)"; \
+	else \
+		echo "$(YELLOW).env file already exists$(NC)"; \
+	fi
+
+check-env: ## Validate environment variables
+	@echo "$(GREEN)Checking environment variables...$(NC)"
+	@python -c "from app.config import settings; print('✅ Environment configuration is valid')"
+
+init-project: env-example dev ## Initialize new project
+	@echo "$(GREEN)Initializing project...$(NC)"
+	@echo "Next steps:"
+	@echo "1. Edit .env file with your database and Redis URLs"
+	@echo "2. Run 'make migrate' to set up the database"
+	@echo "3. Run 'make run-dev' to start development server"
+
+clean: ## Clean up temporary files and caches
+	@echo "$(GREEN)Cleaning up...$(NC)"
+	find . -type f -name "*.pyc" -delete
+	find . -type d -name "__pycache__" -delete
+	find . -type d -name "*.egg-info" -exec rm -rf {} +
+	find . -type f -name ".coverage" -delete
+	rm -rf htmlcov/
+	rm -rf .pytest_cache/
+	rm -rf .mypy_cache/
+
+## Phase 8: Step-by-Step Execution Guide
+
+### Day 1: Project Foundation & Database Setup
+
+#### 1. Initialize Project Structure (30 minutes)
+```bash
+# Create project directory
+mkdir my_demo_app && cd my_demo_app
+
+# Create all directories from the structure
+mkdir -p app/{api/v1/endpoints,database,cache,models,middleware,utils,tests}
+mkdir -p alembic/versions scripts config
+
+# Initialize git
+git init
+git add .
+git commit -m "Initial project structure"
+```
+
+#### 2. Install Dependencies & Setup Environment (20 minutes)
+```bash
+# Install Python dependencies
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+
+# Setup pre-commit hooks
+pre-commit install
+
+# Create environment file
+make env-example
+# Edit .env with your actual database credentials
+```
+
+#### 3. Database Setup with Enhanced Pooling (45 minutes)
+```bash
+# Start PostgreSQL (Docker or local)
+docker run --name postgres-dev -e POSTGRES_PASSWORD=demo123 -e POSTGRES_USER=demo_user -e POSTGRES_DB=demo_db -p 5432:5432 -d postgres:15
+
+# Initialize Alembic
+alembic init alembic
+
+# Create initial migration with all enhancements from Step 9
+alembic revision --autogenerate -m "Initial tables with indexes and constraints"
+
+# Run migrations
+make migrate
+
+# Verify database setup
+make db-health
+```
+
+#### 4. Implement Core Database Layer (90 minutes)
+```bash
+# Implement connection pooling (Step 4)
+# Add retry logic (Step 5)
+# Create transaction management (Step 6)
+# Build query layer with prepared statements (Step 7)
+# Add database monitoring (Step 8)
+
+# Test database layer
+python -c "
+import asyncio
+from app.database.connection import init_db_pools, get_db
+async def test():
+    await init_db_pools()
+    async with get_db() as db:
+        result = await db.fetchval('SELECT 1')
+        print(f'Database test: {result}')
+asyncio.run(test())
+"
+```
+
+### Day 2: API Development & Security
+
+#### 5. Implement Redis Caching (30 minutes)
+```bash
+# Start Redis
+docker run --name redis-dev -p 6379:6379 -d redis:7-alpine
+
+# Test cache layer
+python -c "
+import asyncio
+from app.cache.redis_client import init_redis, get_or_set_cache
+async def test():
+    await init_redis()
+    result = await get_or_set_cache('test_key', lambda: 'test_value')
+    print(f'Cache test: {result}')
+asyncio.run(test())
+"
+```
+
+#### 6. Build API Endpoints with Error Handling (60 minutes)
+```bash
+# Implement Pydantic models (Step 12)
+# Create health check endpoints (Step 10)
+# Build company endpoints with validation (Step 11)
+
+# Test API endpoints
+make run-dev
+curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/docs  # Check Swagger documentation
+```
+
+#### 7. Add Security & Middleware (45 minutes)
+```bash
+# Implement security middleware (Step 13)
+# Add error handling middleware (Step 14)
+# Configure CORS and headers
+
+# Test security features
+curl -H "Content-Length: 50000000" http://localhost:8000/api/v1/companies  # Should get 413
+```
+
+#### 8. Content Moderation & Validation (30 minutes)
+```bash
+# Test content moderation
+curl -X POST http://localhost:8000/api/v1/companies \
+  -H "Content-Type: application/json" \
+  -d '{"name": "BadWord Company", "user_uuid": "550e8400-e29b-41d4-a716-446655440000", "product_uuid": "550e8400-e29b-41d4-a716-446655440001", "commune_uuid": "550e8400-e29b-41d4-a716-446655440002"}'
+```
+
+### Day 3: Testing & Production Deployment
+
+#### 9. Comprehensive Testing (60 minutes)
+```bash
+# Run all tests
+make test
+
+# Run database-specific tests
+make test-db
+
+# Load testing
+make load-test
+
+# Security scanning
+make security-scan
+```
+
+#### 10. Docker & Production Configuration (45 minutes)
+```bash
+# Build Docker images
+make docker-build
+
+# Test with Docker Compose
+make docker-run
+
+# Check all services are healthy
+curl http://localhost:8000/api/v1/health/detailed
+```
+
+#### 11. Monitoring & Logging Setup (30 minutes)
+```bash
+# Test monitoring
+make monitor
+
+# Run continuous monitoring (in another terminal)
+make monitor-continuous
+
+# Check database health
+make db-health
+```
+
+#### 12. Production Deployment (45 minutes)
+```bash
+# Set production environment variables
+export DB_PASSWORD="secure_password_here"
+export SECRET_KEY="your-super-secret-key-here"
+export REDIS_PASSWORD="redis_password_here"
+
+# Deploy to production
+make deploy
+
+# Create initial backup
+make backup
+
+# Verify deployment
+curl https://yourdomain.com/api/v1/health
+```
+
+## Phase 9: PostgreSQL Best Practices Checklist
+
+### ✅ Connection Pooling Implementation
+- [x] **Pool size tuning**: Min 5, Max 20 connections per instance
+- [x] **Connection lifecycle**: Proper initialization and cleanup
+- [x] **Pool monitoring**: Real-time connection statistics
+- [x] **SSL/TLS support**: Configurable security modes
+- [x] **Connection timeout**: 30s command timeout, 60s server timeout
+- [x] **Health checks**: Automated pool health monitoring
+
+### ✅ SQL Safety & Parameterization
+- [x] **Prepared statements**: Cached prepared statements for performance
+- [x] **Parameter binding**: All queries use $1, $2, etc. parameters
+- [x] **Query builder**: Safe dynamic query construction
+- [x] **SQL injection prevention**: Zero string concatenation in queries
+- [x] **Input validation**: Pydantic models with field validation
+- [x] **Content moderation**: XSS and injection pattern detection
+
+### ✅ Transaction Management
+- [x] **ACID compliance**: Proper transaction isolation levels
+- [x] **Rollback handling**: Automatic rollback on errors
+- [x] **Deadlock detection**: Retry logic for transient failures
+- [x] **Transaction timeout**: Configurable statement timeouts
+- [x] **Batch operations**: Efficient bulk insert with conflict resolution
+- [x] **Long transaction prevention**: Monitoring for blocking queries
+
+### ✅ Error Handling & Retries
+- [x] **Transient error detection**: Automatic retry for connection failures
+- [x] **Circuit breaker pattern**: Fail fast on repeated errors
+- [x] **Exponential backoff**: Smart retry timing
+- [x] **Error logging**: Structured error tracking
+- [x] **Graceful degradation**: Fallback strategies for cache failures
+- [x] **Health check integration**: Database status in health endpoints
+
+### ✅ Performance Optimization
+- [x] **Index strategy**: Composite indexes for common queries
+- [x] **Query optimization**: EXPLAIN ANALYZE integration
+- [x] **Partial indexes**: Indexes only on active records (deleted_at IS NULL)
+- [x] **Full-text search**: PostgreSQL tsvector indexes
+- [x] **Connection reuse**: Proper pool configuration
+- [x] **Slow query logging**: Automatic detection and alerting
+
+### ✅ Security & Access Control
+- [x] **Least privilege**: Separate read/write database users
+- [x] **SSL/TLS encryption**: Required for production connections
+- [x] **Password security**: Strong authentication methods
+- [x] **Connection limits**: Per-user connection restrictions
+- [x] **Audit logging**: Database operation tracking
+- [x] **Network security**: VPC/firewall restrictions
+
+### ✅ Monitoring & Health Checks
+- [x] **Real-time metrics**: Connection pool, query performance
+- [x] **Health endpoints**: Kubernetes-ready liveness/readiness probes
+- [x] **Alert thresholds**: Configurable warning levels
+- [x] **Performance tracking**: Slow query identification
+- [x] **Resource monitoring**: Memory, CPU, disk usage
+- [x] **Lock monitoring**: Deadlock and blocking query detection
+
+### ✅ Schema Migration & Versioning
+- [x] **Version control**: Alembic migration management
+- [x] **Rollback capability**: Safe schema rollbacks
+- [x] **Data consistency**: Transaction-wrapped migrations
+- [x] **Production safety**: Zero-downtime migration patterns
+- [x] **Constraint validation**: Proper foreign key and check constraints
+- [x] **Index optimization**: Strategic index creation timing
+
+## Professional Development Benefits
+
+This implementation demonstrates several production-ready practices that distinguish professional backend development:
+
+### 🏗️ **Architecture Excellence**
+- **Separation of concerns**: Clean layers for database, caching, API, and business logic
+- **Dependency injection**: FastAPI dependency system for testability
+- **Configuration management**: Environment-based settings with validation
+- **Error boundaries**: Comprehensive error handling at all levels
+
+### 🔐 **Security First**
+- **Defense in depth**: Multiple security layers (middleware, validation, database)
+- **Content security**: XSS prevention, input sanitization, file type validation
+- **Rate limiting**: Protection against abuse and DoS attacks
+- **Security headers**: Modern browser security controls
+
+### 📊 **Observability & Monitoring**
+- **Structured logging**: JSON logs with correlation IDs
+- **Health checks**: Multi-level health monitoring
+- **Performance metrics**: Real-time system and database metrics
+- **Alert integration**: Configurable thresholds and notifications
+
+### 🚀 **Production Readiness**
+- **Docker deployment**: Multi-stage builds with security best practices
+- **Load balancing**: Nginx reverse proxy with SSL termination
+- **Database optimization**: Connection pooling, prepared statements, indexing
+- **Backup & recovery**: Automated backup with rollback procedures
+
+### 🧪 **Quality Assurance**
+- **Comprehensive testing**: Unit, integration, and load testing
+- **Code quality tools**: Linting, formatting, type checking
+- **Security scanning**: Vulnerability detection and prevention
+- **Performance testing**: Load testing with realistic scenarios
+
+This FastAPI + PostgreSQL implementation provides a solid foundation for production applications with enterprise-level reliability, security, and maintainability.
