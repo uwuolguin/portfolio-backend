@@ -1,4 +1,7 @@
-1) In my local computer I installed python and postgres.
+1) In my local computer I installed python and postgresql.
 2) My computer uses windows OS, so I have to install https://slproweb.com/products/Win32OpenSSL.html
    for the ssl certificates i want to implement in my postgres instance.
-3)
+3) Created a directory to store openssl files and open key.
+4) Enabled SSL in my postgresql instance/service
+5) I created a Python virtual environment and install FastAPI dependencies 
+   and activated of course, added it to gitignore
