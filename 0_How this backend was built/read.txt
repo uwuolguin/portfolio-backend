@@ -1,0 +1,4 @@
+1) In my local computer I installed python and postgres.
+2) My computer uses windows OS, so I have to install https://slproweb.com/products/Win32OpenSSL.html
+   for the ssl certificates i want to implement in my postgres instance.
+3)
