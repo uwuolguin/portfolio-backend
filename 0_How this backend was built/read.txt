@@ -8,3 +8,4 @@ I Created a DB: CREATE DATABASE proveo;
 I started using Alembic: pip install alembic, alembic init alembic;
 I modified alembic.ini so it is uselful and added the models.py files to connect alembic to the database
 I made sure config.py , .env, models.py and alembic env.py had the correct configuration/ values
+I created the first migration file without running the upgrade command, evaluated the creation of schema as first step and modify everything accordingly
