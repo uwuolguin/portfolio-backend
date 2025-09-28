@@ -1,7 +1,10 @@
-1) In my local computer I installed python and postgresql.
-2) My computer uses windows OS, so I have to install https://slproweb.com/products/Win32OpenSSL.html
-   for the ssl certificates i want to implement in my postgres instance.
-3) Created a directory to store openssl files and open key.
-4) Enabled SSL in my postgresql instance/service
-5) I created a Python virtual environment and install FastAPI dependencies 
-   and activated of course, added it to gitignore
+On my local computer, I installed Python and PostgreSQL.
+My computer uses Windows OS, so I had to install OpenSSL from https://slproweb.com/products/Win32OpenSSL.html for the SSL certificates I want to implement in my PostgreSQL instance.
+I created a directory to store OpenSSL files and generated the SSL keys.
+I enabled SSL in my PostgreSQL instance/service.
+I created a Python virtual environment, installed FastAPI dependencies, and activated it in cmd. Of course, I also added it to .gitignore.
+I created a user and password for postgresql, values have to change in prodction deployment: CREATE USER fastapi WITH PASSWORD 'mypassword';
+I Created a DB: CREATE DATABASE proveo;
+I started using Alembic: pip install alembic, alembic init alembic;
+I modified alembic.ini so it is uselful and added the models.py files to connect alembic to the database
+I made sure config.py , .env, models.py and alembic env.py had the correct configuration/ values
