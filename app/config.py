@@ -18,13 +18,13 @@ class Settings(BaseSettings):
     db_ssl_key_path: Optional[str] = None
 
     # Redis
-    redis_url: str
+    #redis_url: str
     redis_timeout: int = 5
     cache_ttl: int = 3600
     redis_ssl: bool = False
     
     # Security
-    secret_key: str
+    #secret_key: str
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     

@@ -55,19 +55,18 @@ def run_migrations_online() -> None:
     
     # Build connect_args
     connect_args = {}
-    if hasattr(settings, 'db_command_timeout'):
-        connect_args["command_timeout"] = settings.db_command_timeout
-    if hasattr(settings, 'db_server_timeout'):
-        connect_args["server_timeout"] = settings.db_server_timeout
-    
+    # psycopg2 does not support command_timeout / server_timeout
+    # If you need statement timeout, use:
+    connect_args["options"] = "-c statement_timeout=60000"
     # Add schema search path for PostgreSQL
-    connect_args["options"] = "-csearch_path=public"
-    
+    # Add schema search path for PostgreSQL
+    connect_args["options"] = "-c search_path=public"
+
     connectable = engine_from_config(
         configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
-        connect_args=connect_args
+        connect_args=connect_args,
     )
 
     with connectable.connect() as connection:
