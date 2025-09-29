@@ -4,6 +4,7 @@ from typing import Optional, List
 class Settings(BaseSettings):
     # Database Connection & Pool Configuration
     database_url: str
+    alembic_database_url: str
     db_pool_min_size: int = 5
     db_pool_max_size: int = 20
     db_pool_max_queries: int = 50000      # Max queries per connection before reset

@@ -26,7 +26,7 @@ target_metadata = Base.metadata
 
 def get_database_url():
     """Get database URL with proper SSL configuration"""
-    base_url = settings.database_url
+    base_url = settings.alembic_database_url
 
     if hasattr(settings, 'db_ssl_mode') and settings.db_ssl_mode != "disable":
         separator = "&" if "?" in base_url else "?"
