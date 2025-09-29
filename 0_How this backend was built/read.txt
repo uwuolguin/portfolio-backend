@@ -11,3 +11,4 @@ I made sure config.py , .env, models.py and alembic env.py had the correct confi
 I created the first migration file without running the upgrade command, evaluated the creation of schema as first step and modify everything accordingly
 To create a version is with this: alembic revision -m "create fastapi schema and tables"
 To go to the head, use this: alembic upgrade head
+I created a version to add materialized view for magic word search
