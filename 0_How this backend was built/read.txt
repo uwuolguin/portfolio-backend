@@ -12,4 +12,4 @@ I created the first migration file without running the upgrade command, evaluate
 To create a version is with this: alembic revision -m "create fastapi schema and tables"
 To go to the head, use this: alembic upgrade head
 I created a version to add materialized view for magic word search
-I started to check the asyncpg, raw sql and more
+I built the asyncpg pool connection in connection.py
