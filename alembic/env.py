@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     from app.config import settings
-    from app.models import Base
+    from models import Base
 except ImportError as e:
     raise ImportError(f"Could not import app modules. Make sure your app is in the Python path: {e}")
 
