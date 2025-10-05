@@ -13,3 +13,5 @@ To create a version is with this: alembic revision -m "create fastapi schema and
 To go to the head, use this: alembic upgrade head
 I created a version to add materialized view for magic word search
 I built the asyncpg pool connection in connection.py
+I built the retry logic for the queries in the db_retry.py 
+Added the transaction logic using the sandwich patter in transactions.py
