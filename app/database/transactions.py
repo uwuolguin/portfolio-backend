@@ -1,9 +1,11 @@
+# CHECK SQL INJECTION WHEN YOU MODIFY THIS IN THE FUTURE
 import asyncpg
 import structlog
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional, List, Dict, Any, Callable
+from typing import AsyncGenerator, Optional, List, Dict, Any
 from enum import Enum
 from uuid import UUID
+from app.utils.db_retry import db_retry  # Import it
 
 logger = structlog.get_logger(__name__)
 
@@ -26,214 +28,236 @@ async def transaction(
     tx_sql = f"BEGIN {' '.join(options)}"
     try:
         await conn.execute(tx_sql)
-        logger.debug(
-            "transaction_started",
-            isolation=isolation.value,
-            readonly=readonly
-        )
+        logger.debug("transaction_started", isolation=isolation.value, readonly=readonly)
         yield conn
         await conn.execute("COMMIT")
         logger.debug("transaction_committed")
     except Exception as e:
         await conn.execute("ROLLBACK")
-        logger.warning(
-            "transaction_rolled_back",
-            error=str(e),
-            error_type=type(e).__name__
-        )
+        logger.warning("transaction_rolled_back", error=str(e), error_type=type(e).__name__)
         raise
 
 
-class TransactionManager:
+class DB:
+    """Simple database queries - all SQL injection safe with retry logic"""
+    
     @staticmethod
-    async def soft_delete_record(
+    @db_retry()  # Add retry decorator
+    async def get_products(conn: asyncpg.Connection) -> List[Dict[str, Any]]:
+        async with transaction(conn, readonly=True):
+            query = """
+                SELECT uuid, name_es, name_en, created_at
+                FROM products
+                WHERE deleted_at IS NULL
+                ORDER BY name_es
+            """
+            rows = await conn.fetch(query)
+            return [dict(row) for row in rows]
+    
+    @staticmethod
+    @db_retry()  # Add to all methods
+    async def get_product(conn: asyncpg.Connection, product_uuid: UUID) -> Optional[Dict[str, Any]]:
+        async with transaction(conn, readonly=True):
+            query = """
+                SELECT uuid, name_es, name_en, created_at
+                FROM products
+                WHERE uuid = $1 AND deleted_at IS NULL
+            """
+            row = await conn.fetchrow(query, product_uuid)
+            return dict(row) if row else None
+    
+    @staticmethod
+    @db_retry()
+    async def get_communes(conn: asyncpg.Connection) -> List[Dict[str, Any]]:
+        async with transaction(conn, readonly=True):
+            query = """
+                SELECT uuid, name, created_at
+                FROM communes
+                WHERE deleted_at IS NULL
+                ORDER BY name
+            """
+            rows = await conn.fetch(query)
+            return [dict(row) for row in rows]
+    
+    @staticmethod
+    @db_retry()
+    async def get_companies(
         conn: asyncpg.Connection,
-        table: str,
-        deleted_table: str,
-        record_uuid: UUID,
-        schema: str = "fastapi"
-    ) -> bool:
+        page: int = 1,
+        page_size: int = 10,
+        product_uuid: Optional[UUID] = None,
+        commune_uuid: Optional[UUID] = None,
+        search: Optional[str] = None
+    ) -> Dict[str, Any]:
+        async with transaction(conn, readonly=True):
+            where_parts = ["deleted_at IS NULL"]
+            params = []
+            param_idx = 1
+            
+            if product_uuid:
+                where_parts.append(f"product_uuid = ${param_idx}")
+                params.append(product_uuid)
+                param_idx += 1
+            
+            if commune_uuid:
+                where_parts.append(f"commune_uuid = ${param_idx}")
+                params.append(commune_uuid)
+                param_idx += 1
+            
+            if search:
+                where_parts.append(f"name ILIKE ${param_idx}")
+                params.append(f"%{search}%")
+                param_idx += 1
+            
+            where_clause = " AND ".join(where_parts)
+            
+            count_query = f"SELECT COUNT(*) FROM companies WHERE {where_clause}"
+            total = await conn.fetchval(count_query, *params)
+            
+            offset = (page - 1) * page_size
+            data_query = f"""
+                SELECT uuid, name, description_es, description_en,
+                       address, phone, email, image_url, 
+                       created_at, updated_at
+                FROM companies
+                WHERE {where_clause}
+                ORDER BY created_at DESC
+                LIMIT ${param_idx} OFFSET ${param_idx + 1}
+            """
+            params.extend([page_size, offset])
+            rows = await conn.fetch(data_query, *params)
+            
+            return {
+                "items": [dict(row) for row in rows],
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": (total + page_size - 1) // page_size
+            }
+    
+    @staticmethod
+    @db_retry()
+    async def create_company(
+        conn: asyncpg.Connection,
+        user_uuid: UUID,
+        product_uuid: UUID,
+        commune_uuid: UUID,
+        name: str,
+        description_es: Optional[str] = None,
+        description_en: Optional[str] = None,
+        address: Optional[str] = None,
+        phone: Optional[str] = None,
+        email: Optional[str] = None,
+        image_url: Optional[str] = None
+    ) -> Dict[str, Any]:
         async with transaction(conn):
-            select_sql = f"""
-                SELECT * FROM {schema}.{table}
-                WHERE uuid = $1
+            # Validate foreign keys
+            product_check = await conn.fetchval(
+                "SELECT 1 FROM products WHERE uuid = $1 AND deleted_at IS NULL",
+                product_uuid
+            )
+            if not product_check:
+                raise ValueError(f"Product {product_uuid} not found")
+            
+            commune_check = await conn.fetchval(
+                "SELECT 1 FROM communes WHERE uuid = $1 AND deleted_at IS NULL",
+                commune_uuid
+            )
+            if not commune_check:
+                raise ValueError(f"Commune {commune_uuid} not found")
+            
+            query = """
+                INSERT INTO companies (
+                    user_uuid, product_uuid, commune_uuid, name,
+                    description_es, description_en, address,
+                    phone, email, image_url
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                RETURNING uuid, name, created_at, updated_at
             """
-            record = await conn.fetchrow(select_sql, record_uuid)
-            if not record:
-                logger.info(
-                    "soft_delete_record_not_found",
-                    table=table,
-                    uuid=str(record_uuid)
-                )
-                return False
-            columns = [col for col in record.keys()]
-            column_names = ', '.join(columns)
-            placeholders = ', '.join([f'${i+1}' for i in range(len(columns))])
-            insert_sql = f"""
-                INSERT INTO {schema}.{deleted_table} ({column_names})
-                VALUES ({placeholders})
-            """
-            values = tuple(record[col] for col in columns)
-            await conn.execute(insert_sql, *values)
-            delete_sql = f"""
-                DELETE FROM {schema}.{table}
-                WHERE uuid = $1
-            """
-            await conn.execute(delete_sql, record_uuid)
-            logger.info(
-                "soft_delete_completed",
-                table=table,
-                uuid=str(record_uuid)
+            row = await conn.fetchrow(
+                query,
+                user_uuid, product_uuid, commune_uuid, name,
+                description_es, description_en, address,
+                phone, email, image_url
             )
-            return True
-
+            logger.info("company_created", company_uuid=str(row["uuid"]))
+            return dict(row)
+    
     @staticmethod
-    async def batch_upsert(
+    @db_retry()
+    async def update_company(
         conn: asyncpg.Connection,
-        table: str,
-        records: List[Dict[str, Any]],
-        conflict_columns: List[str],
-        update_columns: Optional[List[str]] = None,
-        schema: str = "fastapi"
-    ) -> int:
-        if not records:
-            return 0
-        columns = list(records[0].keys())
-        column_names = ', '.join(columns)
-        placeholders = ', '.join([f'${i+1}' for i in range(len(columns))])
-        conflict_cols = ', '.join(conflict_columns)
-        if update_columns:
-            update_clause = ', '.join(
-                [f'{col} = EXCLUDED.{col}' for col in update_columns]
-            )
-            conflict_action = f"DO UPDATE SET {update_clause}"
-        else:
-            conflict_action = "DO NOTHING"
-        upsert_sql = f"""
-            INSERT INTO {schema}.{table} ({column_names})
-            VALUES ({placeholders})
-            ON CONFLICT ({conflict_cols})
-            {conflict_action}
-        """
-        processed = 0
-        async with transaction(conn):
-            for record in records:
-                values = tuple(record[col] for col in columns)
-                await conn.execute(upsert_sql, *values)
-                processed += 1
-        logger.info(
-            "batch_upsert_completed",
-            table=table,
-            records_processed=processed
-        )
-        return processed
-
-    @staticmethod
-    async def execute_batch(
-        conn: asyncpg.Connection,
-        operations: List[Callable],
-        isolation: IsolationLevel = IsolationLevel.READ_COMMITTED
-    ) -> List[Any]:
-        results = []
-        async with transaction(conn, isolation=isolation):
-            for operation in operations:
-                result = await operation()
-                results.append(result)
-        logger.info(
-            "batch_execution_completed",
-            operations_count=len(operations)
-        )
-        return results
-
-    @staticmethod
-    async def refresh_materialized_view(
-        conn: asyncpg.Connection,
-        view_name: str,
-        schema: str = "fastapi",
-        concurrently: bool = False
-    ) -> None:
-        concurrent_keyword = "CONCURRENTLY" if concurrently else ""
-        refresh_sql = f"""
-            REFRESH MATERIALIZED VIEW {concurrent_keyword}
-            {schema}.{view_name}
-        """
-        try:
-            await conn.execute(refresh_sql)
-            logger.info(
-                "materialized_view_refreshed",
-                view=f"{schema}.{view_name}",
-                concurrent=concurrently
-            )
-        except asyncpg.PostgresError as e:
-            logger.error(
-                "materialized_view_refresh_failed",
-                view=f"{schema}.{view_name}",
-                error=str(e),
-                error_code=e.sqlstate
-            )
-            raise
-
-    @staticmethod
-    async def atomic_update_with_validation(
-        conn: asyncpg.Connection,
-        table: str,
-        record_uuid: UUID,
-        updates: Dict[str, Any],
-        validator: Optional[Callable] = None,
-        schema: str = "fastapi"
+        company_uuid: UUID,
+        name: Optional[str] = None,
+        description_es: Optional[str] = None,
+        description_en: Optional[str] = None,
+        address: Optional[str] = None,
+        phone: Optional[str] = None,
+        email: Optional[str] = None,
+        image_url: Optional[str] = None,
+        product_uuid: Optional[UUID] = None,
+        commune_uuid: Optional[UUID] = None
     ) -> Optional[Dict[str, Any]]:
-        if not updates:
-            raise ValueError("No updates provided")
         async with transaction(conn):
-            select_sql = f"""
-                SELECT * FROM {schema}.{table}
-                WHERE uuid = $1
-                FOR UPDATE
-            """
-            current = await conn.fetchrow(select_sql, record_uuid)
-            if not current:
-                logger.warning(
-                    "update_record_not_found",
-                    table=table,
-                    uuid=str(record_uuid)
-                )
-                return None
-            if validator:
-                await validator(dict(current))
-            set_clauses = []
-            values = []
+            updates = {}
+            if name is not None:
+                updates['name'] = name
+            if description_es is not None:
+                updates['description_es'] = description_es
+            if description_en is not None:
+                updates['description_en'] = description_en
+            if address is not None:
+                updates['address'] = address
+            if phone is not None:
+                updates['phone'] = phone
+            if email is not None:
+                updates['email'] = email
+            if image_url is not None:
+                updates['image_url'] = image_url
+            if product_uuid is not None:
+                updates['product_uuid'] = product_uuid
+            if commune_uuid is not None:
+                updates['commune_uuid'] = commune_uuid
+            
+            if not updates:
+                raise ValueError("No fields to update")
+            
+            set_parts = []
+            params = []
             for idx, (field, value) in enumerate(updates.items(), start=1):
-                set_clauses.append(f"{field} = ${idx}")
-                values.append(value)
-            values.append(record_uuid)
-            update_sql = f"""
-                UPDATE {schema}.{table}
-                SET {', '.join(set_clauses)}, updated_at = NOW()
-                WHERE uuid = ${len(values)}
-                RETURNING *
+                set_parts.append(f"{field} = ${idx}")
+                params.append(value)
+            
+            params.append(company_uuid)
+            
+            query = f"""
+                UPDATE companies
+                SET {', '.join(set_parts)}, updated_at = NOW()
+                WHERE uuid = ${len(params)} AND deleted_at IS NULL
+                RETURNING uuid, name, description_es, description_en,
+                         address, phone, email, image_url,
+                         created_at, updated_at
             """
-            updated = await conn.fetchrow(update_sql, *values)
-            logger.info(
-                "atomic_update_completed",
-                table=table,
-                uuid=str(record_uuid),
-                fields_updated=list(updates.keys())
-            )
-            return dict(updated) if updated else None
-
-
-async def with_transaction(
-    conn: asyncpg.Connection,
-    operation: Callable,
-    isolation: IsolationLevel = IsolationLevel.READ_COMMITTED
-) -> Any:
-    async with transaction(conn, isolation=isolation):
-        return await operation()
-
-
-async def readonly_transaction(
-    conn: asyncpg.Connection,
-    operation: Callable
-) -> Any:
-    async with transaction(conn, readonly=True):
-        return await operation()
+            row = await conn.fetchrow(query, *params)
+            
+            if row:
+                logger.info("company_updated", company_uuid=str(company_uuid))
+                return dict(row)
+            return None
+    
+    @staticmethod
+    @db_retry()
+    async def delete_company(conn: asyncpg.Connection, company_uuid: UUID) -> bool:
+        async with transaction(conn):
+            query = """
+                UPDATE companies
+                SET deleted_at = NOW(), updated_at = NOW()
+                WHERE uuid = $1 AND deleted_at IS NULL
+            """
+            result = await conn.execute(query, company_uuid)
+            rows = int(result.split()[-1])
+            
+            if rows > 0:
+                logger.info("company_deleted", company_uuid=str(company_uuid))
+                return True
+            return False
