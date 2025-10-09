@@ -15,3 +15,4 @@ I created a version to add materialized view for magic word search
 I built the asyncpg pool connection in connection.py
 I built the retry logic for the queries in the db_retry.py 
 Added the transaction logic using the sandwich patter in transactions.py
+Added the routers logic as a esqueleton ,and modify main to also  reflect the adding of the routers and a mini middleware configuration.
