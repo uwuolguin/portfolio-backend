@@ -1,8 +1,12 @@
+# app/main.py - Complete setup
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database.connection import init_db_pools, close_db_pools
+from app.cache.redis_client import redis_client
+from app.middleware.cors import setup_cors
+from app.middleware.logging import LoggingMiddleware
+from app.middleware.security import SecurityHeadersMiddleware, HTTPSRedirectMiddleware
 
 # Import routers
 from app.routers import users, products, communes, companies
@@ -13,9 +17,13 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
     await init_db_pools()
+    await redis_client.connect()
+    
     yield
+    
     # Shutdown
     await close_db_pools()
+    await redis_client.disconnect()
 
 
 app = FastAPI(
@@ -24,14 +32,18 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Setup middleware (ORDER MATTERS!)
+# 1. HTTPS redirect (must be first in production)
+app.add_middleware(HTTPSRedirectMiddleware)
+
+# 2. Security headers
+app.add_middleware(SecurityHeadersMiddleware)
+
+# 3. CORS (must be after security, before logging)
+setup_cors(app)
+
+# 4. Logging (should be last to log everything)
+app.add_middleware(LoggingMiddleware)
 
 # Include routers
 app.include_router(users.router, prefix=settings.api_v1_prefix)

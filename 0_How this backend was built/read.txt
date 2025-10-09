@@ -16,3 +16,8 @@ I built the asyncpg pool connection in connection.py
 I built the retry logic for the queries in the db_retry.py 
 Added the transaction logic using the sandwich patter in transactions.py
 Added the routers logic as a esqueleton ,and modify main to also  reflect the adding of the routers and a mini middleware configuration.
+Decided to add a middleware file in the api to manage:Request/Response Logging, CORS, Control cross-origin requests, Set allowed origins, methods, headers, Security Headers, Add security headers (X-Frame-Options, CSP, etc.), Remove sensitive headers from responses, Implement HTTPS redirects
+Decided to cache using redis for certain endpoints
+Decided to manage csrf token and jwt in files separated
+All things NOT handled by the fastAPI middleware is going to be handled by the Nginx middleware
+Explore database health  check proposed by Claude, you will have logs for requests and db check to take decisions
