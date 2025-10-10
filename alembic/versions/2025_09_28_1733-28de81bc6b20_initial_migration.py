@@ -22,11 +22,16 @@ def upgrade() -> None:
     """Upgrade schema."""
     # --- create schema first ---
     op.execute("CREATE SCHEMA IF NOT EXISTS fastapi")
+    
+    # --- Enable uuid extension (if not already enabled) ---
+    op.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
+    # OR for newer PostgreSQL (14+):
+    # op.execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\"")
 
     # --- tables ---
     op.create_table(
         'communes',
-        sa.Column('uuid', sa.UUID(), nullable=False),
+        sa.Column('uuid', sa.UUID(), nullable=False, server_default=sa.text('gen_random_uuid()')),
         sa.Column('name', sa.String(length=100), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.PrimaryKeyConstraint('uuid'),
@@ -65,7 +70,7 @@ def upgrade() -> None:
 
     op.create_table(
         'products',
-        sa.Column('uuid', sa.UUID(), nullable=False),
+        sa.Column('uuid', sa.UUID(), nullable=False, server_default=sa.text('gen_random_uuid()')),
         sa.Column('name_es', sa.String(length=100), nullable=False),
         sa.Column('name_en', sa.String(length=100), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
@@ -86,7 +91,7 @@ def upgrade() -> None:
 
     op.create_table(
         'users',
-        sa.Column('uuid', sa.UUID(), nullable=False),
+        sa.Column('uuid', sa.UUID(), nullable=False, server_default=sa.text('gen_random_uuid()')),
         sa.Column('name', sa.String(length=100), nullable=False),
         sa.Column('email', sa.String(length=100), nullable=False),
         sa.Column('hashed_password', sa.Text(), nullable=False),
@@ -110,7 +115,7 @@ def upgrade() -> None:
 
     op.create_table(
         'companies',
-        sa.Column('uuid', sa.UUID(), nullable=False),
+        sa.Column('uuid', sa.UUID(), nullable=False, server_default=sa.text('gen_random_uuid()')),
         sa.Column('user_uuid', sa.UUID(), nullable=False),
         sa.Column('product_uuid', sa.UUID(), nullable=False),
         sa.Column('commune_uuid', sa.UUID(), nullable=False),
@@ -129,18 +134,3 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint('uuid'),
         schema='fastapi'
     )
-
-
-def downgrade() -> None:
-    """Downgrade schema."""
-    op.drop_table('companies', schema='fastapi')
-    op.drop_table('users_deleted', schema='fastapi')
-    op.drop_table('users', schema='fastapi')
-    op.drop_table('products_deleted', schema='fastapi')
-    op.drop_table('products', schema='fastapi')
-    op.drop_table('companies_deleted', schema='fastapi')
-    op.drop_table('communes_deleted', schema='fastapi')
-    op.drop_table('communes', schema='fastapi')
-
-    # --- drop schema at the very end ---
-    op.execute("DROP SCHEMA IF EXISTS fastapi CASCADE")

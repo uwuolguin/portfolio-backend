@@ -21,3 +21,4 @@ Decided to cache using redis for certain endpoints
 Decided to manage csrf token and jwt in files separated
 All things NOT handled by the fastAPI middleware is going to be handled by the Nginx middleware
 Explore database health  check proposed by Claude, you will have logs for requests and db check to take decisions
+Installed Redis Locally, is like postgres, but i am running it as a docker container

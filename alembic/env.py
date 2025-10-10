@@ -3,13 +3,15 @@ import sys
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
+from app.schemas.models import Base
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     from app.config import settings
-    from models import Base
+    from app.schemas.models import Base
 except ImportError as e:
+    print (e)
     raise ImportError(f"Could not import app modules. Make sure your app is in the Python path: {e}")
 
 config = context.config
