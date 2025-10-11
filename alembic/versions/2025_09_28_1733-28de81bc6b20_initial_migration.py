@@ -10,25 +10,15 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-
-# revision identifiers, used by Alembic.
 revision: str = '28de81bc6b20'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-
 def upgrade() -> None:
-    """Upgrade schema."""
-    # --- create schema first ---
     op.execute("CREATE SCHEMA IF NOT EXISTS fastapi")
-    
-    # --- Enable uuid extension (if not already enabled) ---
     op.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
-    # OR for newer PostgreSQL (14+):
-    # op.execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\"")
 
-    # --- tables ---
     op.create_table(
         'communes',
         sa.Column('uuid', sa.UUID(), nullable=False, server_default=sa.text('gen_random_uuid()')),

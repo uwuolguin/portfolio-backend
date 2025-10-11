@@ -1,11 +1,10 @@
-# CHECK SQL INJECTION WHEN YOU MODIFY THIS IN THE FUTURE
 import asyncpg
 import structlog
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional, List, Dict, Any
 from enum import Enum
 from uuid import UUID
-from app.utils.db_retry import db_retry  # Import it
+from app.utils.db_retry import db_retry 
 from app.auth.jwt import get_password_hash
 import uuid
 
@@ -55,7 +54,6 @@ class DB:
         Validates email uniqueness before insertion
         """
         async with transaction(conn):
-            # Check if email already exists
             existing = await conn.fetchval(
                 """
                 SELECT 1 FROM fastapi.users 
@@ -67,13 +65,10 @@ class DB:
             if existing:
                 raise ValueError(f"Email {email} is already registered")
             
-            # Hash the password
             hashed_password = get_password_hash(password)
             
-            # Generate UUID here to ensure NOT NULL constraint satisfied
             user_uuid = str(uuid.uuid4())
 
-            # Insert new user
             query = """
                 INSERT INTO fastapi.users (uuid, name, email, hashed_password)
                 VALUES ($1, $2, $3, $4)
@@ -89,6 +84,3 @@ class DB:
             )
             
             return dict(row)
-
-    """Simple database queries - all SQL injection safe with retry logic"""
-    
