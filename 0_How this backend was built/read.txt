@@ -23,3 +23,4 @@ All things NOT handled by the fastAPI middleware is going to be handled by the N
 Explore database health  check proposed by Claude, you will have logs for requests and db check to take decisions
 Installed Redis Locally, is like postgres, but i am running it as a docker container
 Added the first endpoint , sign up, having in cosideration alembic, transaction, connection, settings, retry, main, schemas
+After this point I went with flow, followed the logic of the web and web development

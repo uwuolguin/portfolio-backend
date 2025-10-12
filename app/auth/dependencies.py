@@ -1,4 +1,3 @@
-# app/auth/dependencies.py
 from fastapi import Depends, HTTPException, status, Request
 from typing import Optional
 from app.auth.jwt import decode_access_token
