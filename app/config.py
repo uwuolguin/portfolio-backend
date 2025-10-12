@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     db_retry_wait_multiplier: float = 0.5
     db_retry_max_wait: float = 5.0
     
+
+    admin_email: str
+
     class Config:
         env_file = ".env"
 

@@ -213,64 +213,68 @@ async def get_current_user_info(
     "/me",
     status_code=status.HTTP_200_OK,
     summary="Delete the current user account",
-    description="Permanently delete the currently authenticated user's account"
+    description="Permanently delete the currently authenticated user's account and all associated companies"
 )
 async def delete_me(
     response: Response,
     current_user: dict = Depends(get_current_user),
     db: asyncpg.Connection = Depends(get_db),
-    # CSRF protection is required for state-changing operations like DELETE
     _: None = Depends(verify_csrf) 
 ):
     """
-    Delete the authenticated user's account.
+    Delete the authenticated user's account with cascading deletion.
 
-    Requires valid JWT token in cookie and valid X-CSRF-Token in header.
+    **What happens:**
+    1. All companies owned by user are copied to companies_deleted
+    2. All companies owned by user are deleted from companies table
+    3. User data is copied to users_deleted
+    4. User is deleted from users table
+    5. JWT and CSRF cookies are cleared
 
-    **Flow:**
-    1. Authenticate user using JWT (get_current_user).
-    2. Validate CSRF token (verify_csrf).
-    3. Delete the user from the database using the UUID from the JWT payload.
-    4. Clear the JWT and CSRF cookies.
-
-    Returns a success message.
+    Requires valid JWT token and CSRF token.
     """
     user_uuid = current_user["sub"]
     user_email = current_user["email"]
 
-    # Delete user from the database
     try:
-        # Convert UUID string from JWT to UUID object for the DB function
-        deleted = await DB.delete_user_by_uuid(conn=db, user_uuid=UUID(user_uuid))
+        # Delete user with cascading logic
+        result = await DB.delete_user_by_uuid(conn=db, user_uuid=UUID(user_uuid))
         
-        if not deleted:
-            # Should not happen if get_current_user succeeded, but it's a safeguard
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-            
-    except Exception as e:
-        logger.error("user_deletion_error", user_uuid=user_uuid, error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete user account due to a database error."
+        # Clear cookies
+        response.delete_cookie(
+            key="access_token",
+            httponly=True, 
+            secure=not settings.debug,
+            samesite="lax"
+        )
+        response.delete_cookie(
+            key="csrf_token",
+            httponly=False,  
+            secure=not settings.debug,
+            samesite="lax"
+        )
+        
+        logger.info(
+            "user_account_deleted_with_companies",
+            user_uuid=user_uuid,
+            email=user_email,
+            companies_deleted=result["companies_deleted"]
         )
 
-    # Clear cookies upon successful deletion
-    response.delete_cookie(
-        key="access_token",
-        httponly=True, 
-        secure=not settings.debug,
-        samesite="lax"
-    )
-    response.delete_cookie(
-        key="csrf_token",
-        httponly=False,  
-        secure=not settings.debug,
-        samesite="lax"
-    )
-    
-    logger.info("user_account_deleted", user_uuid=user_uuid, email=user_email)
-
-    return {"message": "User account successfully deleted"}
+        return {
+            "message": "User account and all associated data successfully deleted",
+            "companies_deleted": result["companies_deleted"]
+        }
+        
+    except ValueError as e:
+        # User not found
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error("user_deletion_error", user_uuid=user_uuid, error=str(e), exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete user account"
+        )
