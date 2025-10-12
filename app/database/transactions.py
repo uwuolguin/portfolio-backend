@@ -59,7 +59,6 @@ class DB:
         """
         
         async with transaction(conn):
-            # 1. Check if email already exists
             existing = await conn.fetchval(
                 """
                 SELECT 1 FROM fastapi.users 
@@ -71,7 +70,6 @@ class DB:
             if existing:
                 raise ValueError(f"Email {email} is already registered")
             
-            # 2. Hash password and insert user
             hashed_password = get_password_hash(password)
             
             user_uuid = str(uuid.uuid4())
