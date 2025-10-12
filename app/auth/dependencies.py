@@ -5,22 +5,6 @@ from app.auth.jwt import decode_access_token
 from app.auth.csrf import validate_csrf_token
 
 
-async def get_current_user_optional(request: Request) -> Optional[dict]:
-    """
-    Get current user from JWT cookie (optional - returns None if not authenticated)
-    Use this for endpoints that work with or without auth
-    """
-    token = request.cookies.get("access_token")
-    
-    if not token:
-        return None
-    
-    payload = decode_access_token(token)
-    if not payload:
-        return None
-    
-    return payload
-
 
 async def get_current_user(request: Request) -> dict:
     """

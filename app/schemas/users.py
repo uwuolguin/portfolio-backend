@@ -16,3 +16,13 @@ class UserResponse(BaseModel):
     email: str
     created_at: datetime
     
+class UserLogin(BaseModel):
+    """Schema for user login"""
+    email: EmailStr = Field(..., description="User's email address")
+    password: str = Field(..., min_length=8, max_length=100, description="User's password")
+
+
+class LoginResponse(BaseModel):
+    """Schema for login response"""
+    message: str = Field(..., description="Success message")
+    user: dict = Field(..., description="User information")

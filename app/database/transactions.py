@@ -40,6 +40,10 @@ async def transaction(
 
 
 class DB:
+    """
+    Central class for all database transactions (data access layer).
+    All methods are static and take an asyncpg.Connection object as the first argument.
+    """
 
     @staticmethod
     @db_retry()
@@ -50,10 +54,12 @@ class DB:
         password: str
     ) -> Dict[str, Any]:
         """
-        Create a new user with hashed password
-        Validates email uniqueness before insertion
+        Creates a new user, ensuring the email is unique, and returns the user's data.
+        Raises ValueError if email is already registered.
         """
+        
         async with transaction(conn):
+            # 1. Check if email already exists
             existing = await conn.fetchval(
                 """
                 SELECT 1 FROM fastapi.users 
@@ -65,6 +71,7 @@ class DB:
             if existing:
                 raise ValueError(f"Email {email} is already registered")
             
+            # 2. Hash password and insert user
             hashed_password = get_password_hash(password)
             
             user_uuid = str(uuid.uuid4())
@@ -84,3 +91,50 @@ class DB:
             )
             
             return dict(row)
+        
+    @staticmethod
+    @db_retry()
+    async def get_user_by_email(
+        conn: asyncpg.Connection,
+        email: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get user by email including hashed password for authentication
+        """
+        query = """
+            SELECT uuid, name, email, hashed_password, created_at
+            FROM fastapi.users
+            WHERE email = $1
+        """
+        
+        row = await conn.fetchrow(query, email)
+        
+        if row:
+            return dict(row)
+        
+        return None
+
+    @staticmethod
+    @db_retry()
+    async def delete_user_by_uuid(
+        conn: asyncpg.Connection,
+        user_uuid: UUID
+    ) -> bool:
+        """
+        Delete a user by their UUID.
+        Returns True if a user was deleted, False otherwise.
+        """
+        query = """
+            DELETE FROM fastapi.users
+            WHERE uuid = $1
+            RETURNING uuid
+        """
+        
+        row = await conn.fetchrow(query, user_uuid)
+        
+        if row:
+            logger.info("user_deleted", user_uuid=str(user_uuid))
+            return True
+        
+        logger.warning("user_delete_failed", user_uuid=str(user_uuid), reason="not_found")
+        return False
