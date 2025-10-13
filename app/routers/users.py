@@ -4,7 +4,7 @@ import asyncpg
 from datetime import timedelta
 from app.database.connection import get_db
 from app.database.transactions import DB
-from app.schemas.users import UserSignup, UserResponse,UserLogin, LoginResponse
+from app.schemas.users import UserSignup, UserResponse, UserLogin, LoginResponse
 from app.auth.jwt import verify_password, create_access_token
 from app.auth.csrf import generate_csrf_token
 from app.auth.dependencies import get_current_user, verify_csrf
@@ -31,16 +31,6 @@ async def signup(
     user_data: UserSignup,
     db: asyncpg.Connection = Depends(get_db)
 ):
-    """
-    Register a new user
-    
-    - **name**: User's full name (2-100 characters)
-    - **email**: Valid email address (must be unique)
-    - **password**: Strong password (min 8 chars)
-    
-    Returns the created user data (without password).
-    User must login separately to receive authentication tokens.
-    """
     try:
         user = await DB.create_user(
             conn=db,
@@ -48,10 +38,8 @@ async def signup(
             email=user_data.email,
             password=user_data.password
         )
-        # Exclude hashed_password before returning
         return UserResponse(**user)
     except ValueError as e:
-        # Handle email already registered error
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(e)
@@ -75,73 +63,47 @@ async def login(
     response: Response,
     db: asyncpg.Connection = Depends(get_db)
 ):
-    """
-    Login user with email and password.
-    
-    Sets the following cookies on the response:
-    - **access_token**: HTTP-only, secure, samesite JWT token for authentication.
-    - **csrf_token**: Non-HTTP-only CSRF token for state-changing requests.
-    
-    Returns a success message and the CSRF token (also available via cookie).
-    """
-    # 1. Fetch user by email
     user = await DB.get_user_by_email(conn=db, email=user_data.email)
-    
     if not user or not verify_password(user_data.password, user["hashed_password"]):
         logger.warning("login_failed", email=user_data.email, reason="invalid_credentials")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password"
         )
-    
-    # 2. Create JWT Payload
-    # 'sub' is the standard field for the subject (user identifier)
     jwt_payload = {
         "sub": str(user["uuid"]),
         "name": user["name"],
         "email": user["email"],
         "created_at": user["created_at"].isoformat()
     }
-    
-    # 3. Create Access Token
     access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
     access_token = create_access_token(
         data=jwt_payload, expires_delta=access_token_expires
     )
-    
-    # 4. Create CSRF Token
     csrf_token = generate_csrf_token()
-
-    # 5. Set Cookies
-    
-    # JWT Cookie (Authentication)
     response.set_cookie(
         key="access_token",
         value=access_token,
-        httponly=True,  # IMPORTANT: Prevent client-side JS access
-        secure=not settings.debug,  # Use secure=True in production (HTTPS only)
+        httponly=True,
+        secure=not settings.debug,
         samesite="lax",
-        expires=int(access_token_expires.total_seconds()) # Convert timedelta to seconds
+        expires=int(access_token_expires.total_seconds())
     )
-    
-    # CSRF Cookie (CSRF Protection)
     response.set_cookie(
         key="csrf_token",
         value=csrf_token,
-        httponly=False, # Must be accessible by client-side JS to read and put into X-CSRF-Token header
+        httponly=False,
         secure=not settings.debug,
         samesite="lax",
-        expires=int(access_token_expires.total_seconds()) # Match JWT expiration
+        expires=int(access_token_expires.total_seconds())
     )
-    
     logger.info("login_success", user_uuid=str(user["uuid"]))
-
-
     return LoginResponse(
         message="Login successful",
         csrf_token=csrf_token,
-        user={"email":user["email"]}
+        user={"email": user["email"]}
     )
+
 
 @router.post(
     "/logout",
@@ -149,28 +111,19 @@ async def login(
     description="Clear JWT and CSRF cookies"
 )
 async def logout(response: Response):
-    """
-    Log out the user by clearing the JWT and CSRF cookies.
-    """
-    
-    # Clear JWT cookie
     response.delete_cookie(
         key="access_token",
-        httponly=True, # Must match the original cookie settings
+        httponly=True,
         secure=not settings.debug,
         samesite="lax"
     )
-
-    # Clear CSRF cookie
     response.delete_cookie(
         key="csrf_token",
-        httponly=False,  # Must match the original cookie settings
+        httponly=False,
         secure=not settings.debug,
         samesite="lax"
     )
-    
     logger.info("logout_success")
-    
     return {"message": "Logout successful"}
 
 
@@ -183,32 +136,14 @@ async def logout(response: Response):
 async def get_current_user_info(
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Get current authenticated user information
-    
-    Requires valid JWT token in cookie.
-    Returns user information from the token payload.
-    
-    The JWT token contains: uuid (as 'sub'), name, email, and created_at.
-    This endpoint extracts and returns that information.
-    
-    **Usage:**
-    1. Login first to get JWT cookie
-    2. Make GET request to /users/me
-    3. Browser automatically sends JWT cookie
-    4. Receive your user information
-    
-    **No need to send anything** - the JWT cookie is sent automatically!
-    """
     logger.info("get_current_user", user_uuid=current_user.get("sub"))
-    
-    # JWT token now includes created_at, so we can use it directly
     return UserResponse(
-        uuid=current_user["sub"],  # UUID is stored as 'sub'
+        uuid=current_user["sub"],
         name=current_user["name"],
         email=current_user["email"],
         created_at=current_user["created_at"]
     )
+
 
 @router.delete(
     "/me",
@@ -220,55 +155,35 @@ async def delete_me(
     response: Response,
     current_user: dict = Depends(get_current_user),
     db: asyncpg.Connection = Depends(get_db),
-    _: None = Depends(verify_csrf) 
+    _: None = Depends(verify_csrf)
 ):
-    """
-    Delete the authenticated user's account with cascading deletion.
-
-    **What happens:**
-    1. All companies owned by user are copied to companies_deleted
-    2. All companies owned by user are deleted from companies table
-    3. User data is copied to users_deleted
-    4. User is deleted from users table
-    5. JWT and CSRF cookies are cleared
-
-    Requires valid JWT token and CSRF token.
-    """
     user_uuid = current_user["sub"]
     user_email = current_user["email"]
-
     try:
-        # Delete user with cascading logic
         result = await DB.delete_user_by_uuid(conn=db, user_uuid=UUID(user_uuid))
-        
-        # Clear cookies
         response.delete_cookie(
             key="access_token",
-            httponly=True, 
+            httponly=True,
             secure=not settings.debug,
             samesite="lax"
         )
         response.delete_cookie(
             key="csrf_token",
-            httponly=False,  
+            httponly=False,
             secure=not settings.debug,
             samesite="lax"
         )
-        
         logger.info(
             "user_account_deleted_with_companies",
             user_uuid=user_uuid,
             email=user_email,
             companies_deleted=result["companies_deleted"]
         )
-
         return {
             "message": "User account and all associated data successfully deleted",
             "companies_deleted": result["companies_deleted"]
         }
-        
     except ValueError as e:
-        # User not found
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
