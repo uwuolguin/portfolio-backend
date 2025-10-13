@@ -136,10 +136,11 @@ async def login(
     
     logger.info("login_success", user_uuid=str(user["uuid"]))
 
+
     return LoginResponse(
         message="Login successful",
         csrf_token=csrf_token,
-        user=UserResponse(**user)
+        user={"email":user["email"]}
     )
 
 @router.post(
