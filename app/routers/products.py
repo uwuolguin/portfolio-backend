@@ -17,6 +17,10 @@ router = APIRouter(
 )
 
 
+# ============================================================================
+# PUBLIC ENDPOINTS - No authentication required
+# ============================================================================
+
 @router.get(
     "/",
     response_model=List[ProductResponse],
@@ -30,14 +34,8 @@ async def list_products(
 ):
     """List all products - public endpoint"""
     try:
-        query = """
-            SELECT uuid, name_es, name_en, created_at
-            FROM fastapi.products
-            ORDER BY name_en ASC
-            LIMIT $1 OFFSET $2
-        """
-        rows = await db.fetch(query, limit, offset)
-        return [ProductResponse(**dict(row)) for row in rows]
+        products = await DB.get_all_products(conn=db, limit=limit, offset=offset)
+        return [ProductResponse(**product) for product in products]
     except Exception as e:
         logger.error("list_products_error", error=str(e))
         raise HTTPException(
@@ -58,20 +56,13 @@ async def get_product(
 ):
     """Get a single product by UUID - public endpoint"""
     try:
-        query = """
-            SELECT uuid, name_es, name_en, created_at
-            FROM fastapi.products
-            WHERE uuid = $1
-        """
-        row = await db.fetchrow(query, product_uuid)
-        
-        if not row:
+        product = await DB.get_product_by_uuid(conn=db, product_uuid=product_uuid)
+        if not product:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Product with UUID {product_uuid} not found"
             )
-        
-        return ProductResponse(**dict(row))
+        return ProductResponse(**product)
     except HTTPException:
         raise
     except Exception as e:
@@ -81,6 +72,10 @@ async def get_product(
             detail="Failed to retrieve product"
         )
 
+
+# ============================================================================
+# ADMIN-ONLY ENDPOINTS - Requires admin authentication
+# ============================================================================
 
 @router.post(
     "/",
@@ -97,46 +92,28 @@ async def create_product(
 ):
     """Create a new product - admin only"""
     try:
-        if not DB.is_admin(current_user["email"]):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only admin users can create products"
-            )
-        
-        existing = await db.fetchval(
-            "SELECT 1 FROM fastapi.products WHERE name_en = $1 OR name_es = $2",
-            product_data.name_en,
-            product_data.name_es
+        product = await DB.create_product(
+            conn=db,
+            name_es=product_data.name_es,
+            name_en=product_data.name_en,
+            user_email=current_user["email"]
         )
-        
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Product with this name already exists"
-            )
-        
-        insert_query = """
-            INSERT INTO fastapi.products (name_es, name_en)
-            VALUES ($1, $2)
-            RETURNING uuid, name_es, name_en, created_at
-        """
-        
-        row = await db.fetchrow(
-            insert_query,
-            product_data.name_es,
-            product_data.name_en
-        )
-        
         logger.info(
             "product_created",
-            product_uuid=str(row["uuid"]),
+            product_uuid=str(product["uuid"]),
             admin_email=current_user["email"]
         )
-        
-        return ProductResponse(**dict(row))
-        
-    except HTTPException:
-        raise
+        return ProductResponse(**product)
+    except PermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e)
+        )
     except Exception as e:
         logger.error("create_product_error", error=str(e), exc_info=True)
         raise HTTPException(
@@ -160,53 +137,13 @@ async def update_product(
 ):
     """Update a product - admin only"""
     try:
-        if not DB.is_admin(current_user["email"]):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only admin users can update products"
-            )
-        
-        existing = await db.fetchval(
-            "SELECT 1 FROM fastapi.products WHERE uuid = $1",
-            product_uuid
+        product = await DB.update_product_by_uuid(
+            conn=db,
+            product_uuid=product_uuid,
+            name_es=product_data.name_es,
+            name_en=product_data.name_en,
+            user_email=current_user["email"]
         )
-        
-        if not existing:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Product with UUID {product_uuid} not found"
-            )
-        
-        update_fields = []
-        params = []
-        param_count = 1
-        
-        if product_data.name_es is not None:
-            update_fields.append(f"name_es = ${param_count}")
-            params.append(product_data.name_es)
-            param_count += 1
-        
-        if product_data.name_en is not None:
-            update_fields.append(f"name_en = ${param_count}")
-            params.append(product_data.name_en)
-            param_count += 1
-        
-        if not update_fields:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No fields provided for update"
-            )
-        
-        params.append(product_uuid)
-        
-        update_query = f"""
-            UPDATE fastapi.products
-            SET {', '.join(update_fields)}
-            WHERE uuid = ${param_count}
-            RETURNING uuid, name_es, name_en, created_at
-        """
-        
-        row = await db.fetchrow(update_query, *params)
         
         await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
         
@@ -215,11 +152,17 @@ async def update_product(
             product_uuid=str(product_uuid),
             admin_email=current_user["email"]
         )
-        
-        return ProductResponse(**dict(row))
-        
-    except HTTPException:
-        raise
+        return ProductResponse(**product)
+    except PermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
     except Exception as e:
         logger.error("update_product_error", error=str(e), exc_info=True)
         raise HTTPException(
@@ -240,14 +183,13 @@ async def delete_product(
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
-    """Delete a product - admin only, fails if any companies are using it"""
+    """
+    Delete a product - admin only.
+    
+    This endpoint will fail if any companies are currently using this product.
+    The product must be unused before it can be deleted.
+    """
     try:
-        if not DB.is_admin(current_user["email"]):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only admin users can delete products"
-            )
-        
         result = await DB.delete_product_by_uuid(
             conn=db,
             product_uuid=product_uuid,
@@ -256,12 +198,18 @@ async def delete_product(
         
         await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
         
+        logger.info(
+            "product_deleted_successfully",
+            product_uuid=str(product_uuid),
+            product_name=result["name_en"],
+            admin_email=current_user["email"]
+        )
+        
         return {
             "message": "Product successfully deleted",
             "uuid": result["uuid"],
             "name": result["name_en"]
         }
-        
     except PermissionError as e:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

@@ -41,6 +41,10 @@ async def transaction(
 
 
 class DB:
+    # ============================================================================
+    # USER OPERATIONS
+    # ============================================================================
+    
     @staticmethod
     @db_retry()
     async def create_user(
@@ -96,6 +100,7 @@ class DB:
             user = await conn.fetchrow(user_query, user_uuid)
             if not user:
                 raise ValueError(f"User with UUID {user_uuid} not found")
+            
             companies_query = """
                 SELECT uuid, user_uuid, product_uuid, commune_uuid, name, 
                        description_es, description_en, address, phone, email, 
@@ -104,6 +109,7 @@ class DB:
                 WHERE user_uuid = $1
             """
             companies = await conn.fetch(companies_query, user_uuid)
+            
             if companies:
                 delete_companies_query = """
                     INSERT INTO fastapi.companies_deleted 
@@ -130,6 +136,7 @@ class DB:
                     user_uuid=str(user_uuid),
                     companies_count=len(companies)
                 )
+            
             insert_deleted_user = """
                 INSERT INTO fastapi.users_deleted (uuid, name, email, hashed_password, created_at)
                 VALUES ($1, $2, $3, $4, $5)
@@ -139,18 +146,622 @@ class DB:
                 user["uuid"], user["name"], user["email"],
                 user["hashed_password"], user["created_at"]
             )
+            
             await conn.execute("DELETE FROM fastapi.users WHERE uuid = $1", user_uuid)
+            
             logger.info(
                 "user_deleted_with_cascade",
                 user_uuid=str(user_uuid),
                 email=user["email"],
                 companies_deleted=len(companies)
             )
+            
             return {
                 "user_uuid": str(user_uuid),
                 "email": user["email"],
                 "companies_deleted": len(companies)
             }
+
+    # ============================================================================
+    # PRODUCT OPERATIONS
+    # ============================================================================
+    
+    @staticmethod
+    @db_retry()
+    async def get_all_products(
+        conn: asyncpg.Connection,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        query = """
+            SELECT uuid, name_es, name_en, created_at
+            FROM fastapi.products
+            ORDER BY name_en ASC
+            LIMIT $1 OFFSET $2
+        """
+        rows = await conn.fetch(query, limit, offset)
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    @db_retry()
+    async def get_product_by_uuid(
+        conn: asyncpg.Connection,
+        product_uuid: UUID
+    ) -> Optional[Dict[str, Any]]:
+        query = """
+            SELECT uuid, name_es, name_en, created_at
+            FROM fastapi.products
+            WHERE uuid = $1
+        """
+        row = await conn.fetchrow(query, product_uuid)
+        return dict(row) if row else None
+
+    @staticmethod
+    @db_retry()
+    async def create_product(
+        conn: asyncpg.Connection,
+        name_es: str,
+        name_en: str,
+        user_email: str
+    ) -> Dict[str, Any]:
+        if not DB.is_admin(user_email):
+            raise PermissionError("Only admin users can create products")
+        
+        async with transaction(conn):
+            existing = await conn.fetchval(
+                "SELECT 1 FROM fastapi.products WHERE name_en = $1 OR name_es = $2",
+                name_en,
+                name_es
+            )
+            
+            if existing:
+                raise ValueError("Product with this name already exists")
+            
+            insert_query = """
+                INSERT INTO fastapi.products (name_es, name_en)
+                VALUES ($1, $2)
+                RETURNING uuid, name_es, name_en, created_at
+            """
+            
+            row = await conn.fetchrow(insert_query, name_es, name_en)
+            logger.info("product_created", product_uuid=str(row["uuid"]))
+            return dict(row)
+
+    @staticmethod
+    @db_retry()
+    async def update_product_by_uuid(
+        conn: asyncpg.Connection,
+        product_uuid: UUID,
+        name_es: Optional[str],
+        name_en: Optional[str],
+        user_email: str
+    ) -> Dict[str, Any]:
+        if not DB.is_admin(user_email):
+            raise PermissionError("Only admin users can update products")
+        
+        async with transaction(conn):
+            existing = await conn.fetchval(
+                "SELECT 1 FROM fastapi.products WHERE uuid = $1",
+                product_uuid
+            )
+            
+            if not existing:
+                raise ValueError(f"Product with UUID {product_uuid} not found")
+            
+            update_fields = []
+            params = []
+            param_count = 1
+            
+            if name_es is not None:
+                update_fields.append(f"name_es = ${param_count}")
+                params.append(name_es)
+                param_count += 1
+            
+            if name_en is not None:
+                update_fields.append(f"name_en = ${param_count}")
+                params.append(name_en)
+                param_count += 1
+            
+            if not update_fields:
+                raise ValueError("No fields provided for update")
+            
+            params.append(product_uuid)
+            
+            update_query = f"""
+                UPDATE fastapi.products
+                SET {', '.join(update_fields)}
+                WHERE uuid = ${param_count}
+                RETURNING uuid, name_es, name_en, created_at
+            """
+            
+            row = await conn.fetchrow(update_query, *params)
+            logger.info("product_updated", product_uuid=str(product_uuid))
+            return dict(row)
+
+    @staticmethod
+    @db_retry()
+    async def delete_product_by_uuid(
+        conn: asyncpg.Connection,
+        product_uuid: UUID,
+        user_email: str
+    ) -> Dict[str, Any]:
+        if not DB.is_admin(user_email):
+            raise PermissionError(
+                "Only admin users can delete products. "
+                "Contact acos2014600836@gmail.com for assistance."
+            )
+        
+        async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
+            product_query = """
+                SELECT uuid, name_es, name_en, created_at
+                FROM fastapi.products
+                WHERE uuid = $1
+            """
+            product = await conn.fetchrow(product_query, product_uuid)
+            
+            if not product:
+                raise ValueError(f"Product with UUID {product_uuid} not found")
+            
+            company_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM fastapi.companies WHERE product_uuid = $1",
+                product_uuid
+            )
+            
+            if company_count > 0:
+                raise ValueError(
+                    f"Cannot delete product '{product['name_en']}'. "
+                    f"{company_count} company(ies) are still using this product."
+                )
+            
+            insert_deleted = """
+                INSERT INTO fastapi.products_deleted (uuid, name_es, name_en, created_at)
+                VALUES ($1, $2, $3, $4)
+            """
+            await conn.execute(
+                insert_deleted,
+                product["uuid"], product["name_es"], product["name_en"], product["created_at"]
+            )
+            
+            await conn.execute("DELETE FROM fastapi.products WHERE uuid = $1", product_uuid)
+            
+            logger.info("product_deleted", product_uuid=str(product_uuid))
+            
+            return {
+                "uuid": str(product["uuid"]),
+                "name_es": product["name_es"],
+                "name_en": product["name_en"]
+            }
+
+    # ============================================================================
+    # COMMUNE OPERATIONS
+    # ============================================================================
+    
+    @staticmethod
+    @db_retry()
+    async def get_all_communes(
+        conn: asyncpg.Connection,
+        limit: int = 500,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        query = """
+            SELECT uuid, name, created_at
+            FROM fastapi.communes
+            ORDER BY name ASC
+            LIMIT $1 OFFSET $2
+        """
+        rows = await conn.fetch(query, limit, offset)
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    @db_retry()
+    async def get_commune_by_uuid(
+        conn: asyncpg.Connection,
+        commune_uuid: UUID
+    ) -> Optional[Dict[str, Any]]:
+        query = """
+            SELECT uuid, name, created_at
+            FROM fastapi.communes
+            WHERE uuid = $1
+        """
+        row = await conn.fetchrow(query, commune_uuid)
+        return dict(row) if row else None
+
+    @staticmethod
+    @db_retry()
+    async def create_commune(
+        conn: asyncpg.Connection,
+        name: str,
+        user_email: str
+    ) -> Dict[str, Any]:
+        if not DB.is_admin(user_email):
+            raise PermissionError("Only admin users can create communes")
+        
+        async with transaction(conn):
+            existing = await conn.fetchval(
+                "SELECT 1 FROM fastapi.communes WHERE name = $1",
+                name
+            )
+            
+            if existing:
+                raise ValueError("Commune with this name already exists")
+            
+            insert_query = """
+                INSERT INTO fastapi.communes (name)
+                VALUES ($1)
+                RETURNING uuid, name, created_at
+            """
+            
+            row = await conn.fetchrow(insert_query, name)
+            logger.info("commune_created", commune_uuid=str(row["uuid"]))
+            return dict(row)
+
+    @staticmethod
+    @db_retry()
+    async def update_commune_by_uuid(
+        conn: asyncpg.Connection,
+        commune_uuid: UUID,
+        name: Optional[str],
+        user_email: str
+    ) -> Dict[str, Any]:
+        if not DB.is_admin(user_email):
+            raise PermissionError("Only admin users can update communes")
+        
+        async with transaction(conn):
+            existing = await conn.fetchval(
+                "SELECT 1 FROM fastapi.communes WHERE uuid = $1",
+                commune_uuid
+            )
+            
+            if not existing:
+                raise ValueError(f"Commune with UUID {commune_uuid} not found")
+            
+            if name is None:
+                raise ValueError("Name is required for update")
+            
+            update_query = """
+                UPDATE fastapi.communes
+                SET name = $1
+                WHERE uuid = $2
+                RETURNING uuid, name, created_at
+            """
+            
+            row = await conn.fetchrow(update_query, name, commune_uuid)
+            logger.info("commune_updated", commune_uuid=str(commune_uuid))
+            return dict(row)
+
+    @staticmethod
+    @db_retry()
+    async def delete_commune_by_uuid(
+        conn: asyncpg.Connection,
+        commune_uuid: UUID,
+        user_email: str
+    ) -> Dict[str, Any]:
+        if not DB.is_admin(user_email):
+            raise PermissionError(
+                "Only admin users can delete communes. "
+                "Contact acos2014600836@gmail.com for assistance."
+            )
+        
+        async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
+            commune_query = """
+                SELECT uuid, name, created_at
+                FROM fastapi.communes
+                WHERE uuid = $1
+            """
+            commune = await conn.fetchrow(commune_query, commune_uuid)
+            
+            if not commune:
+                raise ValueError(f"Commune with UUID {commune_uuid} not found")
+            
+            company_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM fastapi.companies WHERE commune_uuid = $1",
+                commune_uuid
+            )
+            
+            if company_count > 0:
+                raise ValueError(
+                    f"Cannot delete commune '{commune['name']}'. "
+                    f"{company_count} company(ies) are still located in this commune."
+                )
+            
+            insert_deleted = """
+                INSERT INTO fastapi.communes_deleted (uuid, name, created_at)
+                VALUES ($1, $2, $3)
+            """
+            await conn.execute(
+                insert_deleted,
+                commune["uuid"], commune["name"], commune["created_at"]
+            )
+            
+            await conn.execute("DELETE FROM fastapi.communes WHERE uuid = $1", commune_uuid)
+            
+            logger.info("commune_deleted", commune_uuid=str(commune_uuid))
+            
+            return {
+                "uuid": str(commune["uuid"]),
+                "name": commune["name"]
+            }
+
+    # ============================================================================
+    # COMPANY OPERATIONS
+    # ============================================================================
+    
+    @staticmethod
+    @db_retry()
+    async def get_company_by_uuid(
+        conn: asyncpg.Connection,
+        company_uuid: UUID
+    ) -> Optional[Dict[str, Any]]:
+        query = """
+            SELECT 
+                c.uuid,
+                c.user_uuid,
+                c.product_uuid,
+                c.commune_uuid,
+                c.name,
+                c.description_es,
+                c.description_en,
+                c.address,
+                c.phone,
+                c.email,
+                c.image_url,
+                c.created_at,
+                c.updated_at,
+                u.name as user_name,
+                u.email as user_email,
+                p.name_es as product_name_es,
+                p.name_en as product_name_en,
+                cm.name as commune_name
+            FROM fastapi.companies c
+            LEFT JOIN fastapi.users u ON u.uuid = c.user_uuid
+            LEFT JOIN fastapi.products p ON p.uuid = c.product_uuid
+            LEFT JOIN fastapi.communes cm ON cm.uuid = c.commune_uuid
+            WHERE c.uuid = $1
+        """
+        row = await conn.fetchrow(query, company_uuid)
+        return dict(row) if row else None
+
+    @staticmethod
+    @db_retry()
+    async def get_all_companies(
+        conn: asyncpg.Connection,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        query = """
+            SELECT 
+                c.uuid,
+                c.user_uuid,
+                c.product_uuid,
+                c.commune_uuid,
+                c.name,
+                c.description_es,
+                c.description_en,
+                c.address,
+                c.phone,
+                c.email,
+                c.image_url,
+                c.created_at,
+                c.updated_at,
+                u.name as user_name,
+                u.email as user_email,
+                p.name_es as product_name_es,
+                p.name_en as product_name_en,
+                cm.name as commune_name
+            FROM fastapi.companies c
+            LEFT JOIN fastapi.users u ON u.uuid = c.user_uuid
+            LEFT JOIN fastapi.products p ON p.uuid = c.product_uuid
+            LEFT JOIN fastapi.communes cm ON cm.uuid = c.commune_uuid
+            ORDER BY c.created_at DESC
+            LIMIT $1 OFFSET $2
+        """
+        rows = await conn.fetch(query, limit, offset)
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    @db_retry()
+    async def get_companies_by_user_uuid(
+        conn: asyncpg.Connection,
+        user_uuid: UUID
+    ) -> List[Dict[str, Any]]:
+        query = """
+            SELECT 
+                c.uuid,
+                c.user_uuid,
+                c.product_uuid,
+                c.commune_uuid,
+                c.name,
+                c.description_es,
+                c.description_en,
+                c.address,
+                c.phone,
+                c.email,
+                c.image_url,
+                c.created_at,
+                c.updated_at,
+                u.name as user_name,
+                u.email as user_email,
+                p.name_es as product_name_es,
+                p.name_en as product_name_en,
+                cm.name as commune_name
+            FROM fastapi.companies c
+            LEFT JOIN fastapi.users u ON u.uuid = c.user_uuid
+            LEFT JOIN fastapi.products p ON p.uuid = c.product_uuid
+            LEFT JOIN fastapi.communes cm ON cm.uuid = c.commune_uuid
+            WHERE c.user_uuid = $1
+            ORDER BY c.created_at DESC
+        """
+        rows = await conn.fetch(query, user_uuid)
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    @db_retry()
+    async def create_company(
+        conn: asyncpg.Connection,
+        user_uuid: UUID,
+        product_uuid: UUID,
+        commune_uuid: UUID,
+        name: str,
+        description_es: Optional[str],
+        description_en: Optional[str],
+        address: Optional[str],
+        phone: Optional[str],
+        email: Optional[str],
+        image_url: Optional[str]
+    ) -> Dict[str, Any]:
+        async with transaction(conn):
+            # Verify product exists
+            product_exists = await conn.fetchval(
+                "SELECT 1 FROM fastapi.products WHERE uuid = $1",
+                product_uuid
+            )
+            if not product_exists:
+                raise ValueError(f"Product with UUID {product_uuid} does not exist")
+            
+            # Verify commune exists
+            commune_exists = await conn.fetchval(
+                "SELECT 1 FROM fastapi.communes WHERE uuid = $1",
+                commune_uuid
+            )
+            if not commune_exists:
+                raise ValueError(f"Commune with UUID {commune_uuid} does not exist")
+            
+            insert_query = """
+                INSERT INTO fastapi.companies 
+                    (user_uuid, product_uuid, commune_uuid, name, description_es, 
+                     description_en, address, phone, email, image_url)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                RETURNING uuid
+            """
+            
+            row = await conn.fetchrow(
+                insert_query,
+                user_uuid,
+                product_uuid,
+                commune_uuid,
+                name,
+                description_es,
+                description_en,
+                address,
+                phone,
+                email,
+                image_url
+            )
+            
+            logger.info("company_created", company_uuid=str(row["uuid"]), user_uuid=str(user_uuid))
+            
+            # Return complete company data
+            return await DB.get_company_by_uuid(conn, row["uuid"])
+
+    @staticmethod
+    @db_retry()
+    async def update_company_by_uuid(
+        conn: asyncpg.Connection,
+        company_uuid: UUID,
+        user_uuid: UUID,
+        name: Optional[str] = None,
+        description_es: Optional[str] = None,
+        description_en: Optional[str] = None,
+        address: Optional[str] = None,
+        phone: Optional[str] = None,
+        email: Optional[str] = None,
+        image_url: Optional[str] = None,
+        product_uuid: Optional[UUID] = None,
+        commune_uuid: Optional[UUID] = None
+    ) -> Dict[str, Any]:
+        async with transaction(conn):
+            # Verify ownership
+            owner_check = await conn.fetchval(
+                "SELECT user_uuid FROM fastapi.companies WHERE uuid = $1",
+                company_uuid
+            )
+            
+            if not owner_check:
+                raise ValueError(f"Company with UUID {company_uuid} not found")
+            
+            if owner_check != user_uuid:
+                raise PermissionError("You can only update your own companies")
+            
+            update_fields = []
+            params = []
+            param_count = 1
+            
+            if name is not None:
+                update_fields.append(f"name = ${param_count}")
+                params.append(name)
+                param_count += 1
+            
+            if description_es is not None:
+                update_fields.append(f"description_es = ${param_count}")
+                params.append(description_es)
+                param_count += 1
+            
+            if description_en is not None:
+                update_fields.append(f"description_en = ${param_count}")
+                params.append(description_en)
+                param_count += 1
+            
+            if address is not None:
+                update_fields.append(f"address = ${param_count}")
+                params.append(address)
+                param_count += 1
+            
+            if phone is not None:
+                update_fields.append(f"phone = ${param_count}")
+                params.append(phone)
+                param_count += 1
+            
+            if email is not None:
+                update_fields.append(f"email = ${param_count}")
+                params.append(email)
+                param_count += 1
+            
+            if image_url is not None:
+                update_fields.append(f"image_url = ${param_count}")
+                params.append(image_url)
+                param_count += 1
+            
+            if product_uuid is not None:
+                product_exists = await conn.fetchval(
+                    "SELECT 1 FROM fastapi.products WHERE uuid = $1",
+                    product_uuid
+                )
+                if not product_exists:
+                    raise ValueError(f"Product with UUID {product_uuid} does not exist")
+                update_fields.append(f"product_uuid = ${param_count}")
+                params.append(product_uuid)
+                param_count += 1
+            
+            if commune_uuid is not None:
+                commune_exists = await conn.fetchval(
+                    "SELECT 1 FROM fastapi.communes WHERE uuid = $1",
+                    commune_uuid
+                )
+                if not commune_exists:
+                    raise ValueError(f"Commune with UUID {commune_uuid} does not exist")
+                update_fields.append(f"commune_uuid = ${param_count}")
+                params.append(commune_uuid)
+                param_count += 1
+            
+            if not update_fields:
+                raise ValueError("No fields provided for update")
+            
+            update_fields.append(f"updated_at = NOW()")
+            params.append(company_uuid)
+            
+            update_query = f"""
+                UPDATE fastapi.companies
+                SET {', '.join(update_fields)}
+                WHERE uuid = ${param_count}
+                RETURNING uuid
+            """
+            
+            await conn.execute(update_query, *params)
+            
+            logger.info("company_updated", company_uuid=str(company_uuid), user_uuid=str(user_uuid))
+            
+            # Return complete updated company data
+            return await DB.get_company_by_uuid(conn, company_uuid)
 
     @staticmethod
     @db_retry()
@@ -168,6 +779,7 @@ class DB:
                 WHERE uuid = $1 AND user_uuid = $2
             """
             company = await conn.fetchrow(company_query, company_uuid, user_uuid)
+            
             if not company:
                 logger.warning(
                     "company_delete_failed",
@@ -176,6 +788,7 @@ class DB:
                     reason="not_found_or_not_owned"
                 )
                 return False
+            
             insert_deleted = """
                 INSERT INTO fastapi.companies_deleted
                     (uuid, user_uuid, product_uuid, commune_uuid, name,
@@ -191,101 +804,16 @@ class DB:
                 company["email"], company["image_url"], company["created_at"],
                 company["updated_at"]
             )
+            
             await conn.execute("DELETE FROM fastapi.companies WHERE uuid = $1", company_uuid)
+            
             logger.info("company_deleted", company_uuid=str(company_uuid))
             return True
 
+    # ============================================================================
+    # UTILITY METHODS
+    # ============================================================================
+    
     @staticmethod
     def is_admin(email: str) -> bool:
         return email.lower() == settings.admin_email.lower()
-
-    @staticmethod
-    @db_retry()
-    async def delete_product_by_uuid(
-        conn: asyncpg.Connection,
-        product_uuid: UUID,
-        user_email: str
-    ) -> Dict[str, Any]:
-        if not DB.is_admin(user_email):
-            raise PermissionError(
-                "Only admin users can delete products. "
-                "Contact acos2014600836@gmail.com for assistance."
-            )
-        async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
-            product_query = """
-                SELECT uuid, name_es, name_en, created_at
-                FROM fastapi.products
-                WHERE uuid = $1
-            """
-            product = await conn.fetchrow(product_query, product_uuid)
-            if not product:
-                raise ValueError(f"Product with UUID {product_uuid} not found")
-            company_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM fastapi.companies WHERE product_uuid = $1",
-                product_uuid
-            )
-            if company_count > 0:
-                raise ValueError(
-                    f"Cannot delete product '{product['name_en']}'. "
-                    f"{company_count} company(ies) are still using this product."
-                )
-            insert_deleted = """
-                INSERT INTO fastapi.products_deleted (uuid, name_es, name_en, created_at)
-                VALUES ($1, $2, $3, $4)
-            """
-            await conn.execute(
-                insert_deleted,
-                product["uuid"], product["name_es"], product["name_en"], product["created_at"]
-            )
-            await conn.execute("DELETE FROM fastapi.products WHERE uuid = $1", product_uuid)
-            logger.info("product_deleted", product_uuid=str(product_uuid))
-            return {
-                "uuid": str(product["uuid"]),
-                "name_es": product["name_es"],
-                "name_en": product["name_en"]
-            }
-
-    @staticmethod
-    @db_retry()
-    async def delete_commune_by_uuid(
-        conn: asyncpg.Connection,
-        commune_uuid: UUID,
-        user_email: str
-    ) -> Dict[str, Any]:
-        if not DB.is_admin(user_email):
-            raise PermissionError(
-                "Only admin users can delete communes. "
-                "Contact acos2014600836@gmail.com for assistance."
-            )
-        async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
-            commune_query = """
-                SELECT uuid, name, created_at
-                FROM fastapi.communes
-                WHERE uuid = $1
-            """
-            commune = await conn.fetchrow(commune_query, commune_uuid)
-            if not commune:
-                raise ValueError(f"Commune with UUID {commune_uuid} not found")
-            company_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM fastapi.companies WHERE commune_uuid = $1",
-                commune_uuid
-            )
-            if company_count > 0:
-                raise ValueError(
-                    f"Cannot delete commune '{commune['name']}'. "
-                    f"{company_count} company(ies) are still located in this commune."
-                )
-            insert_deleted = """
-                INSERT INTO fastapi.communes_deleted (uuid, name, created_at)
-                VALUES ($1, $2, $3)
-            """
-            await conn.execute(
-                insert_deleted,
-                commune["uuid"], commune["name"], commune["created_at"]
-            )
-            await conn.execute("DELETE FROM fastapi.communes WHERE uuid = $1", commune_uuid)
-            logger.info("commune_deleted", commune_uuid=str(commune_uuid))
-            return {
-                "uuid": str(commune["uuid"]),
-                "name": commune["name"]
-            }
