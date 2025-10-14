@@ -26,3 +26,12 @@ class LoginResponse(BaseModel):
     """Schema for login response"""
     message: str = Field(..., description="Success message")
     user: dict = Field(..., description="User information")
+
+class AdminUserResponse(BaseModel):
+    """Schema for admin viewing all users with company count"""
+    uuid: UUID
+    name: str
+    email: str
+    created_at: datetime
+    company_count: int = Field(..., description="Number of companies owned by this user")
+    

@@ -131,6 +131,10 @@ class DB:
                     "DELETE FROM fastapi.companies WHERE user_uuid = $1",
                     user_uuid
                 )
+                
+                # REFRESH MATERIALIZED VIEW - companies were deleted
+                await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
+                
                 logger.info(
                     "user_companies_deleted",
                     user_uuid=str(user_uuid),
@@ -154,6 +158,144 @@ class DB:
                 user_uuid=str(user_uuid),
                 email=user["email"],
                 companies_deleted=len(companies)
+            )
+            
+            return {
+                "user_uuid": str(user_uuid),
+                "email": user["email"],
+                "companies_deleted": len(companies)
+            }
+    
+    @staticmethod
+    @db_retry()
+    async def get_all_users_with_company_count(
+        conn: asyncpg.Connection,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all users with their company count - admin only.
+        
+        Args:
+            conn: Database connection
+            limit: Maximum number of results
+            offset: Number of results to skip
+            
+        Returns:
+            List of user dictionaries with company_count field
+        """
+        query = """
+            SELECT 
+                u.uuid,
+                u.name,
+                u.email,
+                u.created_at,
+                COUNT(c.uuid) as company_count
+            FROM fastapi.users u
+            LEFT JOIN fastapi.companies c ON c.user_uuid = u.uuid
+            GROUP BY u.uuid, u.name, u.email, u.created_at
+            ORDER BY u.created_at DESC
+            LIMIT $1 OFFSET $2
+        """
+        rows = await conn.fetch(query, limit, offset)
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    @db_retry()
+    async def admin_delete_user_by_uuid(
+        conn: asyncpg.Connection,
+        user_uuid: UUID,
+        admin_email: str
+    ) -> Dict[str, Any]:
+        """
+        Admin can delete any user and cascade delete their companies.
+        
+        This is similar to delete_user_by_uuid but requires admin permissions
+        and can delete any user (not just the current user).
+        
+        Args:
+            conn: Database connection
+            user_uuid: UUID of user to delete
+            admin_email: Email of admin performing the deletion
+            
+        Returns:
+            Dictionary with deleted user info and companies count
+            
+        Raises:
+            PermissionError: If user is not admin
+            ValueError: If user not found
+        """
+        if not DB.is_admin(admin_email):
+            raise PermissionError(
+                "Only admin users can delete other users. "
+                "Contact acos2014600836@gmail.com for assistance."
+            )
+        
+        async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
+            user_query = """
+                SELECT uuid, name, email, hashed_password, created_at
+                FROM fastapi.users
+                WHERE uuid = $1
+            """
+            user = await conn.fetchrow(user_query, user_uuid)
+            if not user:
+                raise ValueError(f"User with UUID {user_uuid} not found")
+            
+            companies_query = """
+                SELECT uuid, user_uuid, product_uuid, commune_uuid, name, 
+                       description_es, description_en, address, phone, email, 
+                       image_url, created_at, updated_at
+                FROM fastapi.companies
+                WHERE user_uuid = $1
+            """
+            companies = await conn.fetch(companies_query, user_uuid)
+            
+            if companies:
+                delete_companies_query = """
+                    INSERT INTO fastapi.companies_deleted 
+                        (uuid, user_uuid, product_uuid, commune_uuid, name, 
+                         description_es, description_en, address, phone, email, 
+                         image_url, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                """
+                for company in companies:
+                    await conn.execute(
+                        delete_companies_query,
+                        company["uuid"], company["user_uuid"], company["product_uuid"],
+                        company["commune_uuid"], company["name"], company["description_es"],
+                        company["description_en"], company["address"], company["phone"],
+                        company["email"], company["image_url"], company["created_at"],
+                        company["updated_at"]
+                    )
+                await conn.execute(
+                    "DELETE FROM fastapi.companies WHERE user_uuid = $1",
+                    user_uuid
+                )
+                logger.info(
+                    "admin_deleted_user_companies",
+                    user_uuid=str(user_uuid),
+                    companies_count=len(companies),
+                    admin_email=admin_email
+                )
+            
+            insert_deleted_user = """
+                INSERT INTO fastapi.users_deleted (uuid, name, email, hashed_password, created_at)
+                VALUES ($1, $2, $3, $4, $5)
+            """
+            await conn.execute(
+                insert_deleted_user,
+                user["uuid"], user["name"], user["email"],
+                user["hashed_password"], user["created_at"]
+            )
+            
+            await conn.execute("DELETE FROM fastapi.users WHERE uuid = $1", user_uuid)
+            
+            logger.info(
+                "admin_deleted_user_with_cascade",
+                deleted_user_uuid=str(user_uuid),
+                deleted_user_email=user["email"],
+                companies_deleted=len(companies),
+                admin_email=admin_email
             )
             
             return {
