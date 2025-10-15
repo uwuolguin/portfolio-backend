@@ -44,33 +44,6 @@ async def list_products(
         )
 
 
-@router.get(
-    "/{product_uuid}",
-    response_model=ProductResponse,
-    summary="Get product by UUID (Public)",
-    description="Retrieve a specific product by UUID"
-)
-async def get_product(
-    product_uuid: UUID,
-    db: asyncpg.Connection = Depends(get_db)
-):
-    """Get a single product by UUID - public endpoint"""
-    try:
-        product = await DB.get_product_by_uuid(conn=db, product_uuid=product_uuid)
-        if not product:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Product with UUID {product_uuid} not found"
-            )
-        return ProductResponse(**product)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("get_product_error", product_uuid=str(product_uuid), error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve product"
-        )
 
 
 # ============================================================================

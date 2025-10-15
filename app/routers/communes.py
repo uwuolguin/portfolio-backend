@@ -44,35 +44,6 @@ async def list_communes(
         )
 
 
-@router.get(
-    "/{commune_uuid}",
-    response_model=CommuneResponse,
-    summary="Get commune by UUID (Public)",
-    description="Retrieve a specific commune by UUID"
-)
-async def get_commune(
-    commune_uuid: UUID,
-    db: asyncpg.Connection = Depends(get_db)
-):
-    """Get a single commune by UUID - public endpoint"""
-    try:
-        commune = await DB.get_commune_by_uuid(conn=db, commune_uuid=commune_uuid)
-        if not commune:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Commune with UUID {commune_uuid} not found"
-            )
-        return CommuneResponse(**commune)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("get_commune_error", commune_uuid=str(commune_uuid), error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve commune"
-        )
-
-
 # ============================================================================
 # ADMIN-ONLY ENDPOINTS - Requires admin authentication
 # ============================================================================
