@@ -49,7 +49,7 @@ async def list_communes(
 # ============================================================================
 
 @router.post(
-    "/",
+    "/use-postman-or-similar-to-send-csrf",
     response_model=CommuneResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a new commune (Admin Only)",

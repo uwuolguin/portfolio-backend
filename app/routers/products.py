@@ -51,7 +51,7 @@ async def list_products(
 # ============================================================================
 
 @router.post(
-    "/",
+    "/use-postman-or-similar-to-send-csrf",
     response_model=ProductResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a new product (Admin Only)",
