@@ -752,6 +752,17 @@ class DB:
         image_url: Optional[str]
     ) -> Dict[str, Any]:
         async with transaction(conn):
+            # Check if user already has a company
+            existing_company = await conn.fetchval(
+                "SELECT 1 FROM fastapi.companies WHERE user_uuid = $1",
+                user_uuid
+            )
+            if existing_company:
+                raise ValueError(
+                    "You already have a company. Each user can only create one company. "
+                    "Please update your existing company instead."
+                )
+            
             # Verify product exists
             product_exists = await conn.fetchval(
                 "SELECT 1 FROM fastapi.products WHERE uuid = $1",
@@ -771,7 +782,7 @@ class DB:
             insert_query = """
                 INSERT INTO fastapi.companies 
                     (user_uuid, product_uuid, commune_uuid, name, description_es, 
-                     description_en, address, phone, email, image_url)
+                    description_en, address, phone, email, image_url)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 RETURNING uuid
             """
@@ -794,7 +805,6 @@ class DB:
             
             # Return complete company data
             return await DB.get_company_by_uuid(conn, row["uuid"])
-
     @staticmethod
     @db_retry()
     async def update_company_by_uuid(
@@ -952,6 +962,149 @@ class DB:
             logger.info("company_deleted", company_uuid=str(company_uuid))
             return True
 
+    @staticmethod
+    @db_retry()
+    async def search_companies(
+        conn: asyncpg.Connection,
+        query: str,
+        lang: str = "es",
+        limit: int = 20,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Search companies using materialized view with full-text search.
+        
+        Args:
+            conn: Database connection
+            query: Search query string
+            lang: Language for search ('es' or 'en')
+            limit: Maximum number of results
+            offset: Number of results to skip
+            
+        Returns:
+            List of company dictionaries with search results
+        """
+        search_query = """
+            SELECT 
+                company_id,
+                company_name,
+                company_description_es,
+                company_description_en,
+                address,
+                company_email,
+                product_name_es,
+                product_name_en,
+                user_name,
+                user_email,
+                commune_name,
+                ts_rank(search_vector, tsquery) AS rank
+            FROM fastapi.company_search,
+                 to_tsquery($1, $2) tsquery
+            WHERE search_vector @@ tsquery
+            ORDER BY rank DESC
+            LIMIT $3 OFFSET $4
+        """
+        
+        # Determine language config for to_tsquery
+        lang_config = 'spanish' if lang == 'es' else 'english'
+        
+        # Format search terms for tsquery (replace spaces with & for AND search)
+        formatted_query = ' & '.join(query.split())
+        
+        rows = await conn.fetch(
+            search_query,
+            lang_config,
+            formatted_query,
+            limit,
+            offset
+        )
+        
+        results = []
+        for row in rows:
+            results.append({
+                "uuid": row["company_id"],
+                "name": row["company_name"],
+                "description": row[f"company_description_{lang}"],
+                "address": row["address"],
+                "email": row["company_email"],
+                "product_name": row[f"product_name_{lang}"],
+                "commune_name": row["commune_name"],
+                "relevance_score": float(row["rank"])
+            })
+        
+        return results
+
+    @staticmethod
+    @db_retry()
+    async def admin_delete_company_by_uuid(
+        conn: asyncpg.Connection,
+        company_uuid: UUID,
+        admin_email: str
+    ) -> Dict[str, Any]:
+        """
+        Admin can delete any company regardless of ownership.
+        
+        Args:
+            conn: Database connection
+            company_uuid: UUID of company to delete
+            admin_email: Email of admin performing the deletion
+            
+        Returns:
+            Dictionary with deleted company info
+            
+        Raises:
+            PermissionError: If user is not admin
+            ValueError: If company not found
+        """
+        if not DB.is_admin(admin_email):
+            raise PermissionError(
+                "Only admin users can delete any company. "
+                "Contact acos2014600836@gmail.com for assistance."
+            )
+        
+        async with transaction(conn):
+            company_query = """
+                SELECT uuid, user_uuid, product_uuid, commune_uuid, name,
+                       description_es, description_en, address, phone, email,
+                       image_url, created_at, updated_at
+                FROM fastapi.companies
+                WHERE uuid = $1
+            """
+            company = await conn.fetchrow(company_query, company_uuid)
+            
+            if not company:
+                raise ValueError(f"Company with UUID {company_uuid} not found")
+            
+            # Move to deleted table
+            insert_deleted = """
+                INSERT INTO fastapi.companies_deleted
+                    (uuid, user_uuid, product_uuid, commune_uuid, name,
+                     description_es, description_en, address, phone, email,
+                     image_url, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            """
+            await conn.execute(
+                insert_deleted,
+                company["uuid"], company["user_uuid"], company["product_uuid"],
+                company["commune_uuid"], company["name"], company["description_es"],
+                company["description_en"], company["address"], company["phone"],
+                company["email"], company["image_url"], company["created_at"],
+                company["updated_at"]
+            )
+            
+            # Delete from main table
+            await conn.execute("DELETE FROM fastapi.companies WHERE uuid = $1", company_uuid)
+            
+            logger.info(
+                "admin_deleted_company",
+                company_uuid=str(company_uuid),
+                admin_email=admin_email
+            )
+            
+            return {
+                "uuid": str(company["uuid"]),
+                "name": company["name"]
+            }
     # ============================================================================
     # UTILITY METHODS
     # ============================================================================

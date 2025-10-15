@@ -96,7 +96,7 @@ async def create_product(
 
 
 @router.put(
-    "/{product_uuid}",
+    "/{product_uuid}/use-postman-or-similar-to-send-csrf",
     response_model=ProductResponse,
     summary="Update a product (Admin Only)",
     description="Update a product - admin authentication required"
@@ -145,7 +145,7 @@ async def update_product(
 
 
 @router.delete(
-    "/{product_uuid}",
+    "/{product_uuid}/use-postman-or-similar-to-send-csrf",
     status_code=status.HTTP_200_OK,
     summary="Delete a product (Admin Only)",
     description="Delete a product - admin authentication required, fails if companies use it"

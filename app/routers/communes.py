@@ -88,7 +88,7 @@ async def create_commune(
 
 
 @router.put(
-    "/{commune_uuid}",
+    "/{commune_uuid}/use-postman-or-similar-to-send-csrf",
     response_model=CommuneResponse,
     summary="Update a commune (Admin Only)",
     description="Update a commune - admin authentication required"
@@ -129,7 +129,7 @@ async def update_commune(
 
 
 @router.delete(
-    "/{commune_uuid}",
+    "/{commune_uuid}/use-postman-or-similar-to-send-csrf",
     status_code=status.HTTP_200_OK,
     summary="Delete a commune (Admin Only)",
     description="Delete a commune - admin authentication required, fails if companies use it"
