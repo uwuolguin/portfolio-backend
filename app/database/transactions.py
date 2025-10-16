@@ -228,7 +228,6 @@ class DB:
         if not DB.is_admin(admin_email):
             raise PermissionError(
                 "Only admin users can delete other users. "
-                "Contact acos2014600836@gmail.com for assistance."
             )
         
         async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
@@ -430,7 +429,6 @@ class DB:
         if not DB.is_admin(user_email):
             raise PermissionError(
                 "Only admin users can delete products. "
-                "Contact acos2014600836@gmail.com for assistance."
             )
         
         async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
@@ -496,20 +494,6 @@ class DB:
 
     @staticmethod
     @db_retry()
-    async def get_commune_by_uuid(
-        conn: asyncpg.Connection,
-        commune_uuid: UUID
-    ) -> Optional[Dict[str, Any]]:
-        query = """
-            SELECT uuid, name, created_at
-            FROM fastapi.communes
-            WHERE uuid = $1
-        """
-        row = await conn.fetchrow(query, commune_uuid)
-        return dict(row) if row else None
-
-    @staticmethod
-    @db_retry()
     async def create_commune(
         conn: asyncpg.Connection,
         name: str,
@@ -527,14 +511,15 @@ class DB:
             if existing:
                 raise ValueError("Commune with this name already exists")
             
+            commune_uuid= str(uuid.uuid4())
             insert_query = """
-                INSERT INTO fastapi.communes (name)
-                VALUES ($1)
+                INSERT INTO fastapi.communes (name,uuid)
+                VALUES ($1,$2)
                 RETURNING uuid, name, created_at
             """
             
-            row = await conn.fetchrow(insert_query, name)
-            logger.info("commune_created", commune_uuid=str(row["uuid"]))
+            row = await conn.fetchrow(insert_query, name,commune_uuid)
+            logger.info("commune_created", uuid=commune_uuid)
             return dict(row)
 
     @staticmethod
@@ -580,8 +565,7 @@ class DB:
     ) -> Dict[str, Any]:
         if not DB.is_admin(user_email):
             raise PermissionError(
-                "Only admin users can delete communes. "
-                "Contact acos2014600836@gmail.com for assistance."
+                "Only admin users can delete communes."
             )
         
         async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
@@ -1059,7 +1043,6 @@ class DB:
         if not DB.is_admin(admin_email):
             raise PermissionError(
                 "Only admin users can delete any company. "
-                "Contact acos2014600836@gmail.com for assistance."
             )
         
         async with transaction(conn):

@@ -24,13 +24,6 @@ class CommuneCreate(BaseModel):
         description="Commune name (e.g., 'Santiago', 'Valparaíso')"
     )
     
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "name": "Viña del Mar"
-            }
-        }
-
 
 class CommuneUpdate(BaseModel):
     """
@@ -43,18 +36,12 @@ class CommuneUpdate(BaseModel):
     If you want to make it optional later, change to: Optional[str] = None
     """
     name: Optional[str] = Field(
-        None,
+        ...,
         min_length=1, 
         max_length=100, 
         description="New commune name"
     )
     
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "name": "Santiago Centro"
-            }
-        }
 
 
 class CommuneResponse(BaseModel):
@@ -73,11 +60,3 @@ class CommuneResponse(BaseModel):
     name: str = Field(..., description="Commune name")
     created_at: datetime = Field(..., description="Timestamp when commune was created")
     
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "uuid": "550e8400-e29b-41d4-a716-446655440000",
-                "name": "Santiago",
-                "created_at": "2025-09-28T17:33:58.664718"
-            }
-        }
