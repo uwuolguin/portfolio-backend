@@ -358,16 +358,17 @@ class DB:
             if existing:
                 raise ValueError("Product with this name already exists")
             
+            # Manual UUID generation (like commune)
+            product_uuid = str(uuid.uuid4())
             insert_query = """
-                INSERT INTO fastapi.products (name_es, name_en)
-                VALUES ($1, $2)
+                INSERT INTO fastapi.products (uuid, name_es, name_en)
+                VALUES ($1, $2, $3)
                 RETURNING uuid, name_es, name_en, created_at
             """
             
-            row = await conn.fetchrow(insert_query, name_es, name_en)
+            row = await conn.fetchrow(insert_query, product_uuid, name_es, name_en)
             logger.info("product_created", product_uuid=str(row["uuid"]))
             return dict(row)
-
     @staticmethod
     @db_retry()
     async def update_product_by_uuid(
