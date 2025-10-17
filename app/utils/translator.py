@@ -1,9 +1,9 @@
 # app/utils/translator.py
 """
-Product name translator with automatic fallback.
+Product name translator using async httpx for non-blocking Google Translate API calls.
 If translation fails or is identical, both fields will have the same value.
 """
-from deep_translator import GoogleTranslator
+import httpx
 import structlog
 from typing import Optional, Tuple
 
@@ -12,7 +12,7 @@ logger = structlog.get_logger(__name__)
 
 class ProductTranslator:
     """
-    Handles automatic translation for product names.
+    Handles automatic translation for product names using async httpx.
     
     Behavior:
     - If both names provided: use as-is
@@ -20,6 +20,46 @@ class ProductTranslator:
     - If translation fails: both fields get the same value (the one provided)
     - If translation is identical: both fields get the same value
     """
+    
+    # Google Translate free API endpoint
+    TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
+    
+    @staticmethod
+    async def _translate_text(text: str, source_lang: str, target_lang: str) -> str:
+        """
+        Translate text using Google Translate free API with async httpx.
+        
+        Args:
+            text: Text to translate
+            source_lang: Source language code ('es' or 'en')
+            target_lang: Target language code ('es' or 'en')
+            
+        Returns:
+            Translated text
+            
+        Raises:
+            Exception: If translation fails
+        """
+        params = {
+            'client': 'gtx',
+            'sl': source_lang,
+            'tl': target_lang,
+            'dt': 't',
+            'q': text
+        }
+        
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                ProductTranslator.TRANSLATE_URL,
+                params=params
+            )
+            response.raise_for_status()
+            
+            # Parse response: [[["translated","original",null,null,3]]]
+            result = response.json()
+            translated = result[0][0][0]
+            
+            return translated
     
     @staticmethod
     async def translate_product_name(
@@ -54,7 +94,11 @@ class ProductTranslator:
             if name_es and not name_en:
                 logger.debug("translating_es_to_en", name_es=name_es)
                 
-                translated_en = GoogleTranslator(source='es', target='en').translate(name_es)
+                translated_en = await ProductTranslator._translate_text(
+                    text=name_es,
+                    source_lang='es',
+                    target_lang='en'
+                )
                 
                 # Check if translation is identical (e.g., "Software" -> "Software")
                 if translated_en.lower().strip() == name_es.lower().strip():
@@ -72,7 +116,11 @@ class ProductTranslator:
             if name_en and not name_es:
                 logger.debug("translating_en_to_es", name_en=name_en)
                 
-                translated_es = GoogleTranslator(source='en', target='es').translate(name_en)
+                translated_es = await ProductTranslator._translate_text(
+                    text=name_en,
+                    source_lang='en',
+                    target_lang='es'
+                )
                 
                 # Check if translation is identical
                 if translated_es.lower().strip() == name_en.lower().strip():
@@ -86,24 +134,35 @@ class ProductTranslator:
                 logger.info("translated_en_to_es", original=name_en, translated=translated_es)
                 return (translated_es, name_en)
         
-        except Exception as e:
-            logger.error("translation_failed", error=str(e), exc_info=True)
-            
-            # FALLBACK: If translation fails, use the same value for both
+        except httpx.TimeoutException as e:
+            logger.error("translation_timeout", error=str(e))
+            # FALLBACK: Use same value for both
             if name_es:
-                logger.warning(
-                    "translation_failed_fallback",
-                    using_value=name_es,
-                    for_both_languages=True
-                )
-                return (name_es, name_es)  # Both fields equal
+                logger.warning("translation_failed_fallback", using_value=name_es, reason="timeout")
+                return (name_es, name_es)
             else:
-                logger.warning(
-                    "translation_failed_fallback",
-                    using_value=name_en,
-                    for_both_languages=True
-                )
-                return (name_en, name_en)  # Both fields equal
+                logger.warning("translation_failed_fallback", using_value=name_en, reason="timeout")
+                return (name_en, name_en)
+        
+        except httpx.HTTPStatusError as e:
+            logger.error("translation_http_error", status_code=e.response.status_code, error=str(e))
+            # FALLBACK: Use same value for both
+            if name_es:
+                logger.warning("translation_failed_fallback", using_value=name_es, reason="http_error")
+                return (name_es, name_es)
+            else:
+                logger.warning("translation_failed_fallback", using_value=name_en, reason="http_error")
+                return (name_en, name_en)
+        
+        except Exception as e:
+            logger.error("translation_unexpected_error", error=str(e), exc_info=True)
+            # FALLBACK: Use same value for both
+            if name_es:
+                logger.warning("translation_failed_fallback", using_value=name_es, reason="unexpected_error")
+                return (name_es, name_es)
+            else:
+                logger.warning("translation_failed_fallback", using_value=name_en, reason="unexpected_error")
+                return (name_en, name_en)
 
 
 # Convenience function for use in routers

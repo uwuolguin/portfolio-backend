@@ -10,7 +10,7 @@ class User(Base):
     __tablename__ = "users"
     __table_args__ = {"schema": "fastapi"}
     
-    uuid = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uuid = Column(UUID(as_uuid=True), primary_key=True)
     name = Column(String(100), nullable=False)
     email = Column(String(100), nullable=False, unique=True)
     hashed_password = Column(Text, nullable=False)
@@ -20,7 +20,7 @@ class Product(Base):
     __tablename__ = "products"
     __table_args__ = {"schema": "fastapi"}
     
-    uuid = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uuid = Column(UUID(as_uuid=True), primary_key=True)
     name_es = Column(String(100), nullable=False)
     name_en = Column(String(100), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -29,7 +29,7 @@ class Commune(Base):
     __tablename__ = "communes"
     __table_args__ = {"schema": "fastapi"}
     
-    uuid = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uuid = Column(UUID(as_uuid=True), primary_key=True)
     name = Column(String(100), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -37,17 +37,17 @@ class Company(Base):
     __tablename__ = "companies"
     __table_args__ = {"schema": "fastapi"}
     
-    uuid = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uuid = Column(UUID(as_uuid=True), primary_key=True)
     user_uuid = Column(UUID(as_uuid=True), ForeignKey("fastapi.users.uuid"), nullable=False)
     product_uuid = Column(UUID(as_uuid=True), ForeignKey("fastapi.products.uuid"), nullable=False)
     commune_uuid = Column(UUID(as_uuid=True), ForeignKey("fastapi.communes.uuid"), nullable=False)
     name = Column(String(100), nullable=False)
-    description_es = Column(String(100), nullable=True)
-    description_en = Column(String(100), nullable=True)
-    address = Column(String(100), nullable=True)
-    phone = Column(String(100), nullable=True)
-    email = Column(String(100), nullable=True)
-    image_url = Column(String(10000), nullable=True)
+    description_es = Column(String(100), nullable=False)
+    description_en = Column(String(100), nullable=False)
+    address = Column(String(100), nullable=False)
+    phone = Column(String(100), nullable=False)
+    email = Column(String(100), nullable=False)
+    image_url = Column(String(10000), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
@@ -90,12 +90,12 @@ class CompanyDeleted(Base):
     product_uuid = Column(UUID(as_uuid=True), nullable=False)
     commune_uuid = Column(UUID(as_uuid=True), nullable=False)
     name = Column(String(100), nullable=False)
-    description_es = Column(String(100), nullable=True)
-    description_en = Column(String(100), nullable=True)
-    address = Column(String(100), nullable=True)
-    phone = Column(String(100), nullable=True)
-    email = Column(String(100), nullable=True)
-    image_url = Column(String(10000), nullable=True)
+    description_es = Column(String(100), nullable=False)
+    description_en = Column(String(100), nullable=False)
+    address = Column(String(100), nullable=False)
+    phone = Column(String(100), nullable=False)
+    email = Column(String(100), nullable=False)
+    image_url = Column(String(10000), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
     deleted_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
