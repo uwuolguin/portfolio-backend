@@ -61,7 +61,7 @@ async def update_product(
         name_es = product_data.name_es
         name_en = product_data.name_en
         if name_es or name_en:
-            name_es, name_en = await get_translated_product_names(name_es=name_es, name_en=name_en)
+            name_es, name_en = await translate_field(field_name="product",text_es=product_data.name_es, text_en=product_data.name_en)
             logger.info("updating_product_with_translation", product_uuid=str(product_uuid), original_name_es=product_data.name_es, original_name_en=product_data.name_en, final_name_es=name_es, final_name_en=name_en)
         product = await DB.update_product_by_uuid(conn=db, product_uuid=product_uuid, name_es=name_es, name_en=name_en, user_email=current_user["email"])
         logger.info("product_updated", product_uuid=str(product_uuid), admin_email=current_user["email"])
