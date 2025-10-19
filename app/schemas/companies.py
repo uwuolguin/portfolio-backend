@@ -53,7 +53,6 @@ class CompanyUpdate(BaseModel):
 
     @model_validator(mode='after')
     def check_at_least_one_description(self):
-        # If either description_es or description_en provided, fine — at least one must be given
         if self.description_es is None and self.description_en is None:
             raise ValueError("At least one description (description_es or description_en) must be provided")
         return self
