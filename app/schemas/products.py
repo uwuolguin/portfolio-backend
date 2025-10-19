@@ -50,6 +50,12 @@ class ProductUpdate(BaseModel):
         description="English product name"
     )
 
+    @model_validator(mode='after')
+    def check_at_least_one_name(self):
+        """Ensure at least one name is provided, thre is no reason to hit the endpoint if not"""
+        if not self.name_es and not self.name_en:
+            raise ValueError("At least one product name (name_es or name_en) must be provided")
+        return self
 
 class ProductResponse(BaseModel):
     """Schema for product response"""

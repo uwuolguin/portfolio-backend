@@ -7,7 +7,7 @@ These define the request/response structure and validation rules.
 from pydantic import BaseModel, Field
 from uuid import UUID
 from datetime import datetime
-from typing import Optional
+
 
 
 class CommuneCreate(BaseModel):
@@ -31,11 +31,8 @@ class CommuneUpdate(BaseModel):
     
     Used by: PUT /communes/{commune_uuid}
     Admin only endpoint.
-    
-    Note: Currently only name can be updated.
-    If you want to make it optional later, change to: Optional[str] = None
     """
-    name: Optional[str] = Field(
+    name: str = Field(
         ...,
         min_length=1, 
         max_length=100, 
