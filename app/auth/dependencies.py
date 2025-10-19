@@ -1,9 +1,6 @@
-from fastapi import Depends, HTTPException, status, Request
-from typing import Optional
+from fastapi import HTTPException, status, Request
 from app.auth.jwt import decode_access_token
 from app.auth.csrf import validate_csrf_token
-
-
 
 async def get_current_user(request: Request) -> dict:
     """

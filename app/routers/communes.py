@@ -108,7 +108,7 @@ async def update_commune(
             name=commune_data.name,
             user_email=current_user["email"]
         )
-        await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
+
         return CommuneResponse(**commune)
     except PermissionError as e:
         raise HTTPException(
@@ -147,7 +147,6 @@ async def delete_commune(
             commune_uuid=commune_uuid,
             user_email=current_user["email"]
         )
-        await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
         
         logger.info(
             "commune_deleted_successfully",

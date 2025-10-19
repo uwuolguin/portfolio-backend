@@ -1,41 +1,79 @@
-# app/schemas/companies.py
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from uuid import UUID
 from datetime import datetime
+from typing import Optional
 
 
 class CompanyCreate(BaseModel):
-    """Schema for creating a new company - ALL FIELDS REQUIRED"""
     user_uuid: UUID = Field(..., description="UUID of the user who owns the company (required)")
     product_uuid: UUID = Field(..., description="UUID of the product (required)")
     commune_uuid: UUID = Field(..., description="UUID of the commune (required)")
     name: str = Field(..., min_length=1, max_length=100, description="Company name (required)")
-    description_es: str = Field(..., min_length=1, max_length=100, description="Spanish description (required)")
-    description_en: str = Field(..., min_length=1, max_length=100, description="English description (required)")
+    description_es: Optional[str] = Field(None, min_length=1, max_length=100, description="Spanish description (optional if description_en provided)")
+    description_en: Optional[str] = Field(None, min_length=1, max_length=100, description="English description (optional if description_es provided)")
     address: str = Field(..., min_length=1, max_length=100, description="Physical address (required)")
     phone: str = Field(..., min_length=1, max_length=100, description="Contact phone number (required)")
     email: EmailStr = Field(..., description="Contact email (required)")
     image_url: str = Field(..., min_length=1, max_length=10000, description="Company image URL (required)")
 
+    @model_validator(mode='after')
+    def check_at_least_one_description(self):
+        if not self.description_es and not self.description_en:
+            raise ValueError("At least one description (description_es or description_en) must be provided")
+        return self
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "user_uuid": "e7d5f5a8-51f9-4f6e-b9e9-25a3b24c4d9a",
+                "product_uuid": "3b7e2c5d-87a3-49a0-9a77-24df52a821ac",
+                "commune_uuid": "c77b9481-d8c4-4d5e-9b7d-6d7c3e6c239d",
+                "name": "Panadería Don Pepe",
+                "description_es": "Panadería artesanal con productos frescos cada mañana.",
+                "description_en": None,
+                "address": "Av. Los Aromos 1234",
+                "phone": "+56 9 1234 5678",
+                "email": "contacto@donpepe.cl",
+                "image_url": "https://example.com/images/panaderia.jpg"
+            }
+        }
+    }
+
 
 class CompanyUpdate(BaseModel):
-    """Schema for updating a company - all fields optional for partial updates"""
-    product_uuid: UUID = Field(None, description="UUID of the product")
-    commune_uuid: UUID = Field(None, description="UUID of the commune")
-    name: str = Field(None, min_length=1, max_length=100, description="Company name")
-    description_es: str = Field(None, min_length=1, max_length=100, description="Spanish description")
-    description_en: str = Field(None, min_length=1, max_length=100, description="English description")
-    address: str = Field(None, min_length=1, max_length=100, description="Physical address")
-    phone: str = Field(None, min_length=1, max_length=100, description="Contact phone number")
-    email: EmailStr = Field(None, description="Contact email")
-    image_url: str = Field(None, min_length=1, max_length=10000, description="Company image URL")
+    product_uuid: Optional[UUID] = Field(None, description="UUID of the product")
+    commune_uuid: Optional[UUID] = Field(None, description="UUID of the commune")
+    name: Optional[str] = Field(None, min_length=1, max_length=100, description="Company name")
+    description_es: Optional[str] = Field(None, min_length=1, max_length=100, description="Spanish description")
+    description_en: Optional[str] = Field(None, min_length=1, max_length=100, description="English description")
+    address: Optional[str] = Field(None, min_length=1, max_length=100, description="Physical address")
+    phone: Optional[str] = Field(None, min_length=1, max_length=100, description="Contact phone number")
+    email: Optional[EmailStr] = Field(None, description="Contact email")
+    image_url: Optional[str] = Field(None, min_length=1, max_length=10000, description="Company image URL")
+
+    @model_validator(mode='after')
+    def check_at_least_one_description(self):
+        # If either description_es or description_en provided, fine — at least one must be given
+        if self.description_es is None and self.description_en is None:
+            raise ValueError("At least one description (description_es or description_en) must be provided")
+        return self
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "name": "Panadería Don Pepe (actualizada)",
+                "description_es": "Nueva descripción en español.",
+                "description_en": None,
+                "address": "Av. Las Rosas 4321",
+                "phone": "+56 9 8765 4321",
+                "email": "nuevo@donpepe.cl",
+                "image_url": "https://example.com/images/panaderia_nueva.jpg"
+            }
+        }
+    }
 
 
 class CompanyResponse(BaseModel):
-    """
-    Schema for company response with all data.
-    NO NULL FIELDS - Everything is required because the database doesn't allow NULLs.
-    """
     uuid: UUID
     user_uuid: UUID
     product_uuid: UUID
@@ -49,50 +87,59 @@ class CompanyResponse(BaseModel):
     image_url: str
     created_at: datetime
     updated_at: datetime
-    # Joined data from other tables - these are NOT NULL because JOINs will always succeed
     user_name: str
     user_email: str
     product_name_es: str
     product_name_en: str
     commune_name: str
 
-    class Config:
-        from_attributes = True
-        json_schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
-                "uuid": "123e4567-e89b-12d3-a456-426614174000",
-                "user_uuid": "123e4567-e89b-12d3-a456-426614174001",
-                "product_uuid": "123e4567-e89b-12d3-a456-426614174002",
-                "commune_uuid": "123e4567-e89b-12d3-a456-426614174003",
-                "name": "Tech Solutions SpA",
-                "description_es": "Soluciones tecnológicas innovadoras",
-                "description_en": "Innovative technology solutions",
-                "address": "Av. Providencia 123, Santiago",
-                "phone": "+56912345678",
-                "email": "contact@techsolutions.cl",
-                "image_url": "https://example.com/logo.png",
-                "created_at": "2024-01-15T10:30:00Z",
-                "updated_at": "2024-01-15T10:30:00Z",
-                "user_name": "John Doe",
-                "user_email": "john@example.com",
-                "product_name_es": "Software",
-                "product_name_en": "Software",
+                "uuid": "f8b123aa-7bc2-4ef2-9208-f4f60a15e512",
+                "user_uuid": "e7d5f5a8-51f9-4f6e-b9e9-25a3b24c4d9a",
+                "product_uuid": "3b7e2c5d-87a3-49a0-9a77-24df52a821ac",
+                "commune_uuid": "c77b9481-d8c4-4d5e-9b7d-6d7c3e6c239d",
+                "name": "Panadería Don Pepe",
+                "description_es": "Panadería artesanal con productos frescos cada mañana.",
+                "description_en": "Artisan bakery offering fresh bread every morning.",
+                "address": "Av. Los Aromos 1234",
+                "phone": "+56 9 1234 5678",
+                "email": "contacto@donpepe.cl",
+                "image_url": "https://example.com/images/panaderia.jpg",
+                "created_at": "2025-10-19T15:30:00Z",
+                "updated_at": "2025-10-19T16:00:00Z",
+                "user_name": "Andres Olguin",
+                "user_email": "andres@example.com",
+                "product_name_es": "Pan Artesanal",
+                "product_name_en": "Artisan Bread",
                 "commune_name": "Santiago"
             }
         }
+    }
 
 
 class CompanySearchResponse(BaseModel):
-    """
-    Schema for company search results from materialized view.
-    All fields are required - no nulls.
-    """
-    uuid: UUID
     name: str
     description: str = Field(..., description="Description in requested language")
     address: str
     email: str
+    phone: str
+    img_url: str
     product_name: str = Field(..., description="Product name in requested language")
     commune_name: str
-    relevance_score: float = Field(..., description="Search relevance score", ge=0.0)
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "name": "Panadería Don Pepe",
+                "description": "Panadería artesanal con productos frescos cada mañana.",
+                "address": "Av. Los Aromos 1234",
+                "email": "contacto@donpepe.cl",
+                "phone": "+56 9 1234 5678",
+                "img_url": "https://example.com/images/panaderia.jpg",
+                "product_name": "Pan Artesanal",
+                "commune_name": "Santiago"
+            }
+        }
+    }

@@ -171,7 +171,6 @@ async def update_product(
             user_email=current_user["email"]
         )
         
-        await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
         
         logger.info(
             "product_updated",
@@ -222,7 +221,6 @@ async def delete_product(
             user_email=current_user["email"]
         )
         
-        await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
         
         logger.info(
             "product_deleted_successfully",

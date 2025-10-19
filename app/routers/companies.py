@@ -6,21 +6,12 @@ import asyncpg
 from app.database.connection import get_db
 from app.database.transactions import DB
 from app.auth.dependencies import get_current_user, verify_csrf
-from app.schemas.companies import (
-    CompanyCreate, 
-    CompanyUpdate, 
-    CompanyResponse,
-    CompanySearchResponse
-)
+from app.schemas.companies import CompanyCreate, CompanyUpdate, CompanyResponse, CompanySearchResponse
+from app.utils.translator import translate_field
 import structlog
 
 logger = structlog.get_logger(__name__)
-
-router = APIRouter(
-    prefix="/companies",
-    tags=["companies"]
-)
-
+router = APIRouter(prefix="/companies", tags=["companies"])
 
 # ============================================================================
 # PUBLIC ENDPOINTS - No authentication required
@@ -39,12 +30,8 @@ async def search_companies(
     offset: int = Query(0, ge=0, description="Number of results to skip"),
     db: asyncpg.Connection = Depends(get_db)
 ):
-    """
-    Search companies using PostgreSQL full-text search with GIN index.
-    NOW DELEGATES TO DB CLASS - NO SQL IN ROUTER!
-    """
+    """Search companies using PostgreSQL full-text search with GIN index."""
     try:
-        # Delegate to DB class
         results = await DB.search_companies(
             conn=db,
             query=q,
@@ -52,16 +39,26 @@ async def search_companies(
             limit=limit,
             offset=offset
         )
-        
+
+        # Translate fields dynamically for response
+        translated_results = []
+        for result in results:
+            translated_results.append({
+                **result,
+                "name": translate_field(result["name"], lang),
+                "description": translate_field(result["description"], lang),
+                "product_name": translate_field(result["product_name"], lang)
+            })
+
         logger.info(
             "company_search_performed",
             query=q,
             lang=lang,
-            results_count=len(results)
+            results_count=len(translated_results)
         )
-        
-        return [CompanySearchResponse(**result) for result in results]
-        
+
+        return [CompanySearchResponse(**res) for res in translated_results]
+
     except Exception as e:
         logger.error("company_search_error", error=str(e), exc_info=True)
         raise HTTPException(
@@ -86,10 +83,9 @@ async def create_company(
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
-    """Create a new company - authenticated users only. Limited to ONE company per user."""
+    """Create a new company - authenticated users only."""
     try:
         user_uuid = UUID(current_user["sub"])
-        
         company = await DB.create_company(
             conn=db,
             user_uuid=user_uuid,
@@ -103,35 +99,30 @@ async def create_company(
             email=company_data.email,
             image_url=company_data.image_url
         )
-        
-        await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
-        
-        logger.info(
-            "company_created",
-            company_uuid=str(company["uuid"]),
-            user_uuid=str(user_uuid)
+
+
+        # Translate fields
+        company["name"] = translate_field(company["name"], company_data.lang if hasattr(company_data, "lang") else "es")
+        company["description"] = translate_field(
+            company["description_es"] if company_data.lang == "es" else company["description_en"],
+            company_data.lang if hasattr(company_data, "lang") else "es"
         )
-        
+        company["product_name"] = translate_field(
+            company["product_name_es"] if company_data.lang == "es" else company["product_name_en"],
+            company_data.lang if hasattr(company_data, "lang") else "es"
+        )
+
+        logger.info("company_created", company_uuid=str(company["uuid"]), user_uuid=str(user_uuid))
         return CompanyResponse(**company)
-        
+
     except ValueError as e:
-        # Check if it's the "already has company" error
         if "already have a company" in str(e):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=str(e)
-            )
-        # Otherwise it's a validation error (product/commune doesn't exist)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error("create_company_error", error=str(e), exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create company"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create company")
+
 @router.put(
     "/{company_uuid}",
     response_model=CompanyResponse,
@@ -148,7 +139,6 @@ async def update_company(
     """Update a company - only the owner can update"""
     try:
         user_uuid = UUID(current_user["sub"])
-        
         company = await DB.update_company_by_uuid(
             conn=db,
             company_uuid=company_uuid,
@@ -163,39 +153,31 @@ async def update_company(
             product_uuid=company_data.product_uuid,
             commune_uuid=company_data.commune_uuid
         )
-        
-        await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
-        
-        logger.info(
-            "company_updated",
-            company_uuid=str(company_uuid),
-            user_uuid=str(user_uuid)
+
+
+        # Translate fields
+        company["name"] = translate_field(company["name"], company_data.lang if hasattr(company_data, "lang") else "es")
+        company["description"] = translate_field(
+            company["description_es"] if company_data.lang == "es" else company["description_en"],
+            company_data.lang if hasattr(company_data, "lang") else "es"
         )
-        
-        return CompanyResponse(**company)
-        
-    except PermissionError as e:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=str(e)
-        )
-    except ValueError as e:
-        if "not found" in str(e):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=str(e)
-            )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        logger.error("update_company_error", error=str(e), exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update company"
+        company["product_name"] = translate_field(
+            company["product_name_es"] if company_data.lang == "es" else company["product_name_en"],
+            company_data.lang if hasattr(company_data, "lang") else "es"
         )
 
+        logger.info("company_updated", company_uuid=str(company_uuid), user_uuid=str(user_uuid))
+        return CompanyResponse(**company)
+
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValueError as e:
+        if "not found" in str(e):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error("update_company_error", error=str(e), exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update company")
 
 @router.delete(
     "/{company_uuid}",
@@ -212,37 +194,26 @@ async def delete_company(
     """Delete a company - only the owner can delete"""
     try:
         user_uuid = UUID(current_user["sub"])
-        
-        result = await DB.delete_company_by_uuid(
-            conn=db,
-            company_uuid=company_uuid,
-            user_uuid=user_uuid
-        )
-        
+        result = await DB.delete_company_by_uuid(conn=db, company_uuid=company_uuid, user_uuid=user_uuid)
+
         if not result:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Company not found or you don't have permission to delete it"
             )
-        
-        await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
-        
+
         return {"message": "Company successfully deleted", "uuid": str(company_uuid)}
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error("delete_company_error", error=str(e), exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete company"
-        )
-
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete company")
 
 
 @router.get(
-    "/user/my-company",  # Changed from my-companies to my-company
-    response_model=CompanyResponse,  # Returns single company, not list
+    "/user/my-company",
+    response_model=CompanyResponse,
     summary="Get current user's company (Authenticated)",
     description="Retrieve the company owned by the current user"
 )
@@ -253,27 +224,29 @@ async def get_my_company(
     """Get the company owned by the current user"""
     try:
         user_uuid = UUID(current_user["sub"])
-        
         companies = await DB.get_companies_by_user_uuid(conn=db, user_uuid=user_uuid)
-        
+
         if not companies:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="You don't have a company yet. Create one first."
             )
-        
-        # Return the first (and only) company
-        return CompanyResponse(**companies[0])
-        
+
+        company = companies[0]
+
+        # Translate fields
+        lang = "es"
+        company["name"] = translate_field(company["name"], lang)
+        company["description"] = translate_field(company["description_es"], lang)
+        company["product_name"] = translate_field(company["product_name_es"], lang)
+
+        return CompanyResponse(**company)
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error("get_my_company_error", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve your company"
-        )
-
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve your company")
 
 
 # ============================================================================
@@ -294,31 +267,29 @@ async def admin_list_all_companies(
 ):
     """List all companies - admin only"""
     try:
-        # Check if user is admin
         if not DB.is_admin(current_user["email"]):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only admin users can view all companies"
-            )
-        
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can view all companies")
+
         companies = await DB.get_all_companies(conn=db, limit=limit, offset=offset)
-        
-        logger.info(
-            "admin_list_all_companies",
-            admin_email=current_user["email"],
-            companies_count=len(companies)
-        )
-        
-        return [CompanyResponse(**company) for company in companies]
-        
+
+        # Translate fields
+        translated = []
+        for company in companies:
+            translated.append({
+                **company,
+                "name": translate_field(company["name"], "es"),
+                "description": translate_field(company["description_es"], "es"),
+                "product_name": translate_field(company["product_name_es"], "es")
+            })
+
+        logger.info("admin_list_all_companies", admin_email=current_user["email"], companies_count=len(translated))
+        return [CompanyResponse(**c) for c in translated]
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error("admin_list_companies_error", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve companies"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve companies")
 
 
 @router.delete(
@@ -333,51 +304,24 @@ async def admin_delete_company(
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
-    """
-    Delete any company - admin only.
-    
-    Unlike the regular delete endpoint, this allows admins to delete
-    any company regardless of who owns it.
-    """
+    """Delete any company - admin only."""
     try:
-        # Check if user is admin
         if not DB.is_admin(current_user["email"]):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only admin users can delete any company"
-            )
-        
-        result = await DB.admin_delete_company_by_uuid(
-            conn=db,
-            company_uuid=company_uuid,
-            admin_email=current_user["email"]
-        )
-        
-        await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
-        
-        logger.info(
-            "admin_deleted_company",
-            company_uuid=str(company_uuid),
-            company_name=result["name"],
-            admin_email=current_user["email"]
-        )
-        
-        return {
-            "message": "Company successfully deleted by admin",
-            "uuid": result["uuid"],
-            "name": result["name"]
-        }
-        
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can delete any company")
+
+        result = await DB.admin_delete_company_by_uuid(conn=db, company_uuid=company_uuid, admin_email=current_user["email"])
+
+
+        # Translate fields
+        result["name"] = translate_field(result["name"], "es")
+
+        logger.info("admin_deleted_company", company_uuid=str(company_uuid), company_name=result["name"], admin_email=current_user["email"])
+        return {"message": "Company successfully deleted by admin", "uuid": result["uuid"], "name": result["name"]}
+
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
         logger.error("admin_delete_company_error", error=str(e), exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete company"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete company")

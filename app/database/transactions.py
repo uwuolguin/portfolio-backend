@@ -297,6 +297,7 @@ class DB:
                 admin_email=admin_email
             )
             
+            await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
             return {
                 "user_uuid": str(user_uuid),
                 "email": user["email"],
@@ -418,6 +419,7 @@ class DB:
             
             row = await conn.fetchrow(update_query, *params)
             logger.info("product_updated", product_uuid=str(product_uuid))
+            await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
             return dict(row)
 
     @staticmethod
@@ -467,6 +469,7 @@ class DB:
             
             logger.info("product_deleted", product_uuid=str(product_uuid))
             
+            await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
             return {
                 "uuid": str(product["uuid"]),
                 "name_es": product["name_es"],
@@ -555,6 +558,7 @@ class DB:
             
             row = await conn.fetchrow(update_query, name, commune_uuid)
             logger.info("commune_updated", commune_uuid=str(commune_uuid))
+            await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
             return dict(row)
 
     @staticmethod
@@ -604,6 +608,7 @@ class DB:
             
             logger.info("commune_deleted", commune_uuid=str(commune_uuid))
             
+            await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
             return {
                 "uuid": str(commune["uuid"]),
                 "name": commune["name"]
@@ -789,6 +794,7 @@ class DB:
             logger.info("company_created", company_uuid=str(row["uuid"]), user_uuid=str(user_uuid))
             
             # Return complete company data
+            await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
             return await DB.get_company_by_uuid(conn, row["uuid"])
     @staticmethod
     @db_retry()
@@ -898,6 +904,7 @@ class DB:
             logger.info("company_updated", company_uuid=str(company_uuid), user_uuid=str(user_uuid))
             
             # Return complete updated company data
+            await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
             return await DB.get_company_by_uuid(conn, company_uuid)
 
     @staticmethod
@@ -945,6 +952,7 @@ class DB:
             await conn.execute("DELETE FROM fastapi.companies WHERE uuid = $1", company_uuid)
             
             logger.info("company_deleted", company_uuid=str(company_uuid))
+            await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
             return True
 
     @staticmethod
@@ -1085,6 +1093,7 @@ class DB:
                 admin_email=admin_email
             )
             
+            await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
             return {
                 "uuid": str(company["uuid"]),
                 "name": company["name"]

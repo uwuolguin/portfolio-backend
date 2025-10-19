@@ -299,10 +299,6 @@ async def admin_delete_user(
             admin_email=current_user["email"]
         )
         
-        # Refresh materialized view if companies were deleted
-        if result["companies_deleted"] > 0:
-            await db.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
-        
         logger.info(
             "admin_deleted_user_successfully",
             deleted_user_uuid=str(user_uuid),

@@ -1,5 +1,4 @@
 import secrets
-from typing import Optional
 from fastapi import Request, HTTPException, status
 import structlog
 

@@ -1,45 +1,16 @@
-# app/utils/translator.py
-"""
-Product name translator using async httpx for non-blocking Google Translate API calls.
-If translation fails or is identical, both fields will have the same value.
-"""
 import httpx
 import structlog
 from typing import Optional, Tuple
 
 logger = structlog.get_logger(__name__)
 
+class UniversalTranslator:
 
-class ProductTranslator:
-    """
-    Handles automatic translation for product names using async httpx.
-    
-    Behavior:
-    - If both names provided: use as-is
-    - If only one name: translate to the other language
-    - If translation fails: both fields get the same value (the one provided)
-    - If translation is identical: both fields get the same value
-    """
-    
-    # Google Translate free API endpoint
     TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
     
     @staticmethod
     async def _translate_text(text: str, source_lang: str, target_lang: str) -> str:
-        """
-        Translate text using Google Translate free API with async httpx.
-        
-        Args:
-            text: Text to translate
-            source_lang: Source language code ('es' or 'en')
-            target_lang: Target language code ('es' or 'en')
-            
-        Returns:
-            Translated text
-            
-        Raises:
-            Exception: If translation fails
-        """
+        """Translate text using Google Translate free API with async httpx"""
         params = {
             'client': 'gtx',
             'sl': source_lang,
@@ -47,139 +18,50 @@ class ProductTranslator:
             'dt': 't',
             'q': text
         }
-        
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(
-                ProductTranslator.TRANSLATE_URL,
-                params=params
-            )
+            response = await client.get(UniversalTranslator.TRANSLATE_URL, params=params)
             response.raise_for_status()
-            
-            # Parse response: [[["translated","original",null,null,3]]]
             result = response.json()
-            translated = result[0][0][0]
-            
-            return translated
+            return result[0][0][0]
     
     @staticmethod
-    async def translate_product_name(
-        name_es: Optional[str] = None,
-        name_en: Optional[str] = None
+    async def translate(
+        text_es: Optional[str] = None,
+        text_en: Optional[str] = None,
+        field_name: str = "text"
     ) -> Tuple[str, str]:
-        """
-        Translates product names between Spanish and English.
+        """Universal translation function"""
+        if text_es and text_en:
+            logger.debug(f"both_{field_name}_provided", es_length=len(text_es), en_length=len(text_en))
+            return (text_es, text_en)
         
-        Args:
-            name_es: Spanish product name
-            name_en: English product name
-            
-        Returns:
-            Tuple of (name_es, name_en)
-            
-        Raises:
-            ValueError: If neither name provided
-        """
-        
-        # Case 1: Both provided - use as-is
-        if name_es and name_en:
-            logger.debug("both_names_provided", name_es=name_es, name_en=name_en)
-            return (name_es, name_en)
-        
-        # Case 2: Neither provided - error
-        if not name_es and not name_en:
-            raise ValueError("At least one product name (name_es or name_en) must be provided")
+        if not text_es and not text_en:
+            raise ValueError(f"At least one {field_name} (Spanish or English) must be provided")
         
         try:
-            # Case 3: Only Spanish provided - translate to English
-            if name_es and not name_en:
-                logger.debug("translating_es_to_en", name_es=name_es)
-                
-                translated_en = await ProductTranslator._translate_text(
-                    text=name_es,
-                    source_lang='es',
-                    target_lang='en'
-                )
-                
-                # Check if translation is identical (e.g., "Software" -> "Software")
-                if translated_en.lower().strip() == name_es.lower().strip():
-                    logger.info(
-                        "translation_identical_es_to_en",
-                        name=name_es,
-                        reason="same_in_both_languages"
-                    )
-                    return (name_es, name_es)  # Both fields equal
-                
-                logger.info("translated_es_to_en", original=name_es, translated=translated_en)
-                return (name_es, translated_en)
+            if text_es and not text_en:
+                logger.debug(f"translating_{field_name}_es_to_en", text=text_es[:50])
+                translated_en = await UniversalTranslator._translate_text(text_es, 'es', 'en')
+                if translated_en.lower().strip() == text_es.lower().strip():
+                    return (text_es, text_es)
+                return (text_es, translated_en)
             
-            # Case 4: Only English provided - translate to Spanish
-            if name_en and not name_es:
-                logger.debug("translating_en_to_es", name_en=name_en)
-                
-                translated_es = await ProductTranslator._translate_text(
-                    text=name_en,
-                    source_lang='en',
-                    target_lang='es'
-                )
-                
-                # Check if translation is identical
-                if translated_es.lower().strip() == name_en.lower().strip():
-                    logger.info(
-                        "translation_identical_en_to_es",
-                        name=name_en,
-                        reason="same_in_both_languages"
-                    )
-                    return (name_en, name_en)  # Both fields equal
-                
-                logger.info("translated_en_to_es", original=name_en, translated=translated_es)
-                return (translated_es, name_en)
-        
-        except httpx.TimeoutException as e:
-            logger.error("translation_timeout", error=str(e))
-            # FALLBACK: Use same value for both
-            if name_es:
-                logger.warning("translation_failed_fallback", using_value=name_es, reason="timeout")
-                return (name_es, name_es)
-            else:
-                logger.warning("translation_failed_fallback", using_value=name_en, reason="timeout")
-                return (name_en, name_en)
-        
-        except httpx.HTTPStatusError as e:
-            logger.error("translation_http_error", status_code=e.response.status_code, error=str(e))
-            # FALLBACK: Use same value for both
-            if name_es:
-                logger.warning("translation_failed_fallback", using_value=name_es, reason="http_error")
-                return (name_es, name_es)
-            else:
-                logger.warning("translation_failed_fallback", using_value=name_en, reason="http_error")
-                return (name_en, name_en)
+            if text_en and not text_es:
+                logger.debug(f"translating_{field_name}_en_to_es", text=text_en[:50])
+                translated_es = await UniversalTranslator._translate_text(text_en, 'en', 'es')
+                if translated_es.lower().strip() == text_en.lower().strip():
+                    return (text_en, text_en)
+                return (translated_es, text_en)
         
         except Exception as e:
-            logger.error("translation_unexpected_error", error=str(e), exc_info=True)
-            # FALLBACK: Use same value for both
-            if name_es:
-                logger.warning("translation_failed_fallback", using_value=name_es, reason="unexpected_error")
-                return (name_es, name_es)
-            else:
-                logger.warning("translation_failed_fallback", using_value=name_en, reason="unexpected_error")
-                return (name_en, name_en)
+            logger.error(f"{field_name}_translation_error", error=str(e), exc_info=True)
+            return (text_es or text_en, text_es or text_en)
 
 
-# Convenience function for use in routers
-async def get_translated_product_names(
-    name_es: Optional[str] = None,
-    name_en: Optional[str] = None
+async def translate_field(
+    field_name: str,
+    text_es: Optional[str] = None,
+    text_en: Optional[str] = None
 ) -> Tuple[str, str]:
-    """
-    Wrapper function for easy use in FastAPI routes.
-    
-    Usage in router:
-        name_es, name_en = await get_translated_product_names(
-            name_es=product_data.name_es,
-            name_en=product_data.name_en
-        )
-    
-    Returns:
-        Tuple of (name_es, name_en) - guaranteed to have both values
-    """
-    return await ProductTranslator.translate_product_name(name_es, name_en)
+    """Generic translation helper for any bilingual field"""
+    return await UniversalTranslator.translate(text_es, text_en, field_name=field_name)
