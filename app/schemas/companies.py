@@ -5,7 +5,6 @@ from typing import Optional
 
 
 class CompanyCreate(BaseModel):
-    user_uuid: UUID = Field(..., description="UUID of the user who owns the company (required)")
     product_uuid: UUID = Field(..., description="UUID of the product (required)")
     commune_uuid: UUID = Field(..., description="UUID of the commune (required)")
     name: str = Field(..., min_length=1, max_length=100, description="Company name (required)")
@@ -15,6 +14,7 @@ class CompanyCreate(BaseModel):
     phone: str = Field(..., min_length=1, max_length=100, description="Contact phone number (required)")
     email: EmailStr = Field(..., description="Contact email (required)")
     image_url: str = Field(..., min_length=1, max_length=10000, description="Company image URL (required)")
+    lang: str 
 
     @model_validator(mode='after')
     def check_at_least_one_description(self):
@@ -25,7 +25,6 @@ class CompanyCreate(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
-                "user_uuid": "e7d5f5a8-51f9-4f6e-b9e9-25a3b24c4d9a",
                 "product_uuid": "3b7e2c5d-87a3-49a0-9a77-24df52a821ac",
                 "commune_uuid": "c77b9481-d8c4-4d5e-9b7d-6d7c3e6c239d",
                 "name": "Panadería Don Pepe",
@@ -34,10 +33,11 @@ class CompanyCreate(BaseModel):
                 "address": "Av. Los Aromos 1234",
                 "phone": "+56 9 1234 5678",
                 "email": "contacto@donpepe.cl",
-                "image_url": "https://example.com/images/panaderia.jpg"
+                "image_url": "https://example.com/images/panaderia.jpg",
+                "lang": "es"}
             }
         }
-    }
+    
 
 
 class CompanyUpdate(BaseModel):
