@@ -370,16 +370,17 @@ class DB:
             commune_exists = await conn.fetchval("SELECT 1 FROM fastapi.communes WHERE uuid=$1", commune_uuid)
             if not commune_exists:
                 raise ValueError(f"Commune with UUID {commune_uuid} does not exist")
+            uuid_id = str(uuid.uuid4())
             insert_query = """
                 INSERT INTO fastapi.companies
                     (user_uuid, product_uuid, commune_uuid, name, description_es, description_en,
-                     address, phone, email, image_url)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                     address, phone, email, image_url,uuid)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                 RETURNING uuid
             """
             row = await conn.fetchrow(
                 insert_query, user_uuid, product_uuid, commune_uuid, name,
-                description_es, description_en, address, phone, email, image_url
+                description_es, description_en, address, phone, email, image_url, uuid_id
             )
             logger.info("company_created", company_uuid=str(row["uuid"]), user_uuid=str(user_uuid))
             await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
