@@ -474,11 +474,11 @@ class DB:
                 phone, image_url, user_name, user_email, commune_name,
                 ts_rank(search_vector, tsquery) AS rank
             FROM fastapi.company_search, to_tsquery($1, $2) tsquery
-            WHERE search_vector @@ tsquery
+            WHERE ($2 = '' OR search_vector @@ tsquery)
         """
         params = []
         lang_config = 'spanish' if lang == 'es' else 'english'
-        formatted_query = ' & '.join(query.split())
+        formatted_query = ' & '.join(query.split()) if query else ''
         params.extend([lang_config, formatted_query])
 
 
@@ -515,22 +515,30 @@ class DB:
     async def admin_delete_company_by_uuid(conn: asyncpg.Connection, company_uuid: UUID, admin_email: str) -> Dict[str, Any]:
         if not DB.is_admin(admin_email):
             raise PermissionError("Only admin users can delete any company.")
+
         async with transaction(conn):
             company_query = "SELECT * FROM fastapi.companies WHERE uuid=$1"
             company = await conn.fetchrow(company_query, company_uuid)
             if not company:
                 raise ValueError(f"Company with UUID {company_uuid} not found")
+
             insert_deleted = """
                 INSERT INTO fastapi.companies_deleted
                     (uuid, user_uuid, product_uuid, commune_uuid, name, description_es,
-                     description_en, address, phone, email, image_url, created_at, updated_at)
+                    description_en, address, phone, email, image_url, created_at, updated_at)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             """
             await conn.execute(insert_deleted, *[company[f] for f in company.keys()])
             await conn.execute("DELETE FROM fastapi.companies WHERE uuid=$1", company_uuid)
-            logger.info("admin_deleted_company", company_uuid=str(company_uuid), admin_email=admin_email)
             await conn.execute("REFRESH MATERIALIZED VIEW fastapi.company_search")
-            return {"uuid": str(company["uuid"]), "name": company["name"]}
+
+            logger.info("admin_deleted_company", company_uuid=str(company_uuid), admin_email=admin_email)
+
+            return {
+                "uuid": str(company["uuid"]),
+                "name": company["name"],
+                "image_url": company["image_url"]  # 🧩 crucial for file deletion
+            }
 
     @staticmethod
     def is_admin(email: str) -> bool:

@@ -18,7 +18,7 @@ router = APIRouter(prefix="/companies", tags=["companies"])
     summary="Search companies (Public)"
 )
 async def search_companies(
-    q: str = Query(..., min_length=1),
+    q: Optional[str] = Query(None, min_length=1, description="Search query, optional"),
     lang: str = Query("es", pattern="^(es|en)$"),
     commune: Optional[str] = Query(None, description="Filter by commune name"),
     product: Optional[str] = Query(None, description="Filter by product name"),
@@ -29,7 +29,7 @@ async def search_companies(
     try:
         results = await DB.search_companies(
             conn=db,
-            query=q,
+            query=q or "",
             lang=lang,
             commune=commune,
             product=product,
@@ -90,14 +90,14 @@ async def create_company(
 async def update_company(
     company_uuid: UUID,
     request: Request,
-    name: str = Form(..., min_length=1, max_length=100),
-    product_uuid: UUID = Form(...),
-    commune_uuid: UUID = Form(...),
+    name: Optional[str] = Form(None, min_length=1, max_length=100),
+    product_uuid: Optional[UUID] = Form(None),
+    commune_uuid: Optional[UUID] = Form(None),
     description_es: Optional[str] = Form(None, max_length=100),
     description_en: Optional[str] = Form(None, max_length=100),
-    address: str = Form(..., min_length=5, max_length=100),
-    phone: str = Form(...,max_length=100),
-    email: str = Form(..., max_length=100),
+    address: Optional[str] = Form(None, min_length=5, max_length=100),
+    phone: Optional[str] = Form(None, max_length=100),
+    email: Optional[str] = Form(None, max_length=100),
     lang: Optional[str] = Form(None, pattern="^(es|en)$"),
     image: Optional[UploadFile] = File(None),
     current_user: dict = Depends(get_current_user),
@@ -110,9 +110,14 @@ async def update_company(
         final_description_en = description_en
         if (description_es or description_en) and lang:
             if lang == "es":
-                final_description_es, final_description_en = await translate_field("company_description", description_es, None)
+                final_description_es, final_description_en = await translate_field(
+                    "company_description", description_es, None
+                )
             else:
-                final_description_es, final_description_en = await translate_field("company_description", None, description_en)
+                final_description_es, final_description_en = await translate_field(
+                    "company_description", None, description_en
+                )
+
         new_image_path = None
         old_image_path = None
         if image:
@@ -120,20 +125,36 @@ async def update_company(
             if old_company:
                 old_image_path = old_company.get("image_url")
             new_image_path = await FileHandler.save_image(image, str(company_uuid))
+
         company = await DB.update_company_by_uuid(
-            conn=db, company_uuid=company_uuid, user_uuid=user_uuid,
-            name=name, description_es=final_description_es, description_en=final_description_en,
-            address=address, phone=phone, email=email, image_url=new_image_path,
-            product_uuid=product_uuid, commune_uuid=commune_uuid
+            conn=db,
+            company_uuid=company_uuid,
+            user_uuid=user_uuid,
+            name=name,
+            description_es=final_description_es,
+            description_en=final_description_en,
+            address=address,
+            phone=phone,
+            email=email,
+            image_url=new_image_path,
+            product_uuid=product_uuid,
+            commune_uuid=commune_uuid
         )
+
         if new_image_path and old_image_path and old_image_path != new_image_path:
             FileHandler.delete_image(old_image_path)
+
         response_data = dict(company)
-        response_data["image_url"] = FileHandler.get_image_url(company["image_url"], str(request.base_url).rstrip('/'))
+        response_data["image_url"] = FileHandler.get_image_url(
+            company["image_url"], str(request.base_url).rstrip('/')
+        )
+
         return CompanyResponse(**response_data)
+
     except HTTPException:
         raise
     except Exception as e:
+        logger.error("update_company_error", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to update company")
 
 @router.delete("/{company_uuid}", status_code=status.HTTP_200_OK)
@@ -233,25 +254,31 @@ async def admin_delete_company(
 ):
     try:
         if not DB.is_admin(current_user["email"]):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can delete any company")
-        
-        company = await DB.get_company_by_uuid(conn=db, company_uuid=company_uuid)
-        if company:
-            image_path = company.get("image_url")
-            
-            result = await DB.admin_delete_company_by_uuid(conn=db, company_uuid=company_uuid, admin_email=current_user["email"])
-            
-            if image_path:
-                FileHandler.delete_image(image_path)
-            
-            return {"message": "Company successfully deleted by admin", "uuid": result["uuid"], "name": result["name"]}
-        
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
-        
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can delete companies")
+
+        result = await DB.admin_delete_company_by_uuid(
+            conn=db,
+            company_uuid=company_uuid,
+            admin_email=current_user["email"]
+        )
+
+        from app.utils.file_handler import FileHandler
+        image_path = result.get("image_url")
+        if image_path:
+            FileHandler.delete_image(image_path)
+
+        return {
+            "message": "Company successfully deleted by admin",
+            "uuid": result["uuid"],
+            "name": result["name"]
+        }
+
     except HTTPException:
         raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception as e:
         logger.error("admin_delete_company_error", error=str(e), exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete company")
