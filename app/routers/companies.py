@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from typing import List
+from typing import List,Optional
 from uuid import UUID
 import asyncpg
 from app.database.connection import get_db
@@ -20,17 +20,28 @@ router = APIRouter(prefix="/companies", tags=["companies"])
 )
 async def search_companies(
     q: str = Query(..., min_length=1),
-    lang: str = Query("es", regex="^(es|en)$"),
+    lang: str = Query("es", pattern="^(es|en)$"),
+    commune: Optional[str] = Query(None, description="Filter by commune name"),
+    product: Optional[str] = Query(None, description="Filter by product name"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: asyncpg.Connection = Depends(get_db)
 ):
     try:
-        results = await DB.search_companies(conn=db, query=q, lang=lang, limit=limit, offset=offset)
+        results = await DB.search_companies(
+            conn=db,
+            query=q,
+            lang=lang,
+            commune=commune,
+            product=product,
+            limit=limit,
+            offset=offset
+        )
         return [CompanySearchResponse(**res) for res in results]
     except Exception as e:
         logger.error("company_search_error", error=str(e), exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to search companies")
+
 
 
 @router.post("/", response_model=CompanyResponse, status_code=status.HTTP_201_CREATED)

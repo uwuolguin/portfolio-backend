@@ -466,19 +466,41 @@ class DB:
 
     @staticmethod
     @db_retry()
-    async def search_companies(conn: asyncpg.Connection, query: str, lang: str = "es", limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
-        search_query = """
+    async def search_companies(
+        conn: asyncpg.Connection,
+        query: str,
+        lang: str = "es",
+        commune: Optional[str] = None,
+        product: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        base_query = """
             SELECT company_id, company_name, company_description_es, company_description_en,
-                   address, company_email, product_name_es, product_name_en,phone,image_url,
-                   user_name, user_email, commune_name, ts_rank(search_vector, tsquery) AS rank
-            FROM fastapi.company_search, to_tsquery($1,$2) tsquery
+                address, company_email, product_name_es, product_name_en,
+                phone, image_url, user_name, user_email, commune_name,
+                ts_rank(search_vector, tsquery) AS rank
+            FROM fastapi.company_search, to_tsquery($1, $2) tsquery
             WHERE search_vector @@ tsquery
-            ORDER BY rank DESC
-            LIMIT $3 OFFSET $4
         """
+        params = []
         lang_config = 'spanish' if lang == 'es' else 'english'
         formatted_query = ' & '.join(query.split())
-        rows = await conn.fetch(search_query, lang_config, formatted_query, limit, offset)
+        params.extend([lang_config, formatted_query])
+
+
+        if commune:
+            base_query += " AND LOWER(commune_name) LIKE LOWER($%d)" % (len(params) + 1)
+            params.append(f"%{commune}%")
+        if product:
+            base_query += " AND (LOWER(product_name_es) LIKE LOWER($%d) OR LOWER(product_name_en) LIKE LOWER($%d))" % (len(params) + 1, len(params) + 2)
+            params.extend([f"%{product}%", f"%{product}%"])
+
+        base_query += " ORDER BY rank DESC LIMIT $%d OFFSET $%d" % (len(params) + 1, len(params) + 2)
+        params.extend([limit, offset])
+
+        rows = await conn.fetch(base_query, *params)
+
         return [
             {
                 "uuid": row["company_id"],
