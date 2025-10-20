@@ -26,6 +26,8 @@ def upgrade() -> None:
         c.description_en AS company_description_en,
         c.address,
         c.email AS company_email,
+        c.phone,
+        c.image_url,
         p.name_es AS product_name_es,
         p.name_en AS product_name_en,
         u.name AS user_name,

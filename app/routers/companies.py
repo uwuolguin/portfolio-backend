@@ -27,17 +27,7 @@ async def search_companies(
 ):
     try:
         results = await DB.search_companies(conn=db, query=q, lang=lang, limit=limit, offset=offset)
-        translated_results = [
-            {
-                **r,
-                "name": translate_field(r["name"], lang),
-                "description": translate_field(r["description"], lang),
-                "product_name": translate_field(r["product_name"], lang)
-            }
-            for r in results
-        ]
-        logger.info("company_search_performed", query=q, lang=lang, results_count=len(translated_results))
-        return [CompanySearchResponse(**res) for res in translated_results]
+        return [CompanySearchResponse(**res) for res in results]
     except Exception as e:
         logger.error("company_search_error", error=str(e), exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to search companies")
@@ -109,13 +99,40 @@ async def update_company(
 ):
     try:
         user_uuid = UUID(current_user["sub"])
+        description_es = company_data.description_es
+        description_en = company_data.description_en
+        
+        if company_data.lang:
+            if company_data.lang == "es":
+                description_es, description_en = await translate_field(
+                    field_name="company_description",
+                    text_es=company_data.description_es,
+                    text_en=None
+                )
+            else:
+                description_es, description_en = await translate_field(
+                    field_name="company_description",
+                    text_es=None,
+                    text_en=company_data.description_en
+                )
+            
+            logger.info(
+                "updating_company_with_translation",
+                company_uuid=str(company_uuid),
+                lang=company_data.lang,
+                original_desc_es=company_data.description_es,
+                original_desc_en=company_data.description_en,
+                final_desc_es=description_es,
+                final_desc_en=description_en
+            )
+        
         company = await DB.update_company_by_uuid(
             conn=db,
             company_uuid=company_uuid,
             user_uuid=user_uuid,
             name=company_data.name,
-            description_es=company_data.description_es,
-            description_en=company_data.description_en,
+            description_es=description_es,
+            description_en=description_en,
             address=company_data.address,
             phone=company_data.phone,
             email=company_data.email,
@@ -123,16 +140,10 @@ async def update_company(
             product_uuid=company_data.product_uuid,
             commune_uuid=company_data.commune_uuid
         )
-        lang = getattr(company_data, "lang", "es")
-        company["name"] = translate_field(company["name"], lang)
-        company["description"] = translate_field(
-            company["description_es"] if lang == "es" else company["description_en"], lang
-        )
-        company["product_name"] = translate_field(
-            company["product_name_es"] if lang == "es" else company["product_name_en"], lang
-        )
+        
         logger.info("company_updated", company_uuid=str(company_uuid), user_uuid=str(user_uuid))
         return CompanyResponse(**company)
+        
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except ValueError as e:
@@ -175,10 +186,6 @@ async def get_my_company(
         if not companies:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="You don't have a company yet")
         company = companies[0]
-        lang = "es"
-        company["name"] = translate_field(company["name"], lang)
-        company["description"] = translate_field(company["description_es"], lang)
-        company["product_name"] = translate_field(company["product_name_es"], lang)
         return CompanyResponse(**company)
     except HTTPException:
         raise
@@ -198,17 +205,7 @@ async def admin_list_all_companies(
         if not DB.is_admin(current_user["email"]):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can view all companies")
         companies = await DB.get_all_companies(conn=db, limit=limit, offset=offset)
-        translated = [
-            {
-                **c,
-                "name": translate_field(c["name"], "es"),
-                "description": translate_field(c["description_es"], "es"),
-                "product_name": translate_field(c["product_name_es"], "es")
-            }
-            for c in companies
-        ]
-        logger.info("admin_list_all_companies", admin_email=current_user["email"], companies_count=len(translated))
-        return [CompanyResponse(**c) for c in translated]
+        return [CompanyResponse(**c) for c in companies]
     except HTTPException:
         raise
     except Exception as e:
@@ -227,8 +224,6 @@ async def admin_delete_company(
         if not DB.is_admin(current_user["email"]):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can delete any company")
         result = await DB.admin_delete_company_by_uuid(conn=db, company_uuid=company_uuid, admin_email=current_user["email"])
-        result["name"] = translate_field(result["name"], "es")
-        logger.info("admin_deleted_company", company_uuid=str(company_uuid), company_name=result["name"], admin_email=current_user["email"])
         return {"message": "Company successfully deleted by admin", "uuid": result["uuid"], "name": result["name"]}
     except HTTPException:
         raise

@@ -50,13 +50,20 @@ class CompanyUpdate(BaseModel):
     phone: Optional[str] = Field(None, min_length=1, max_length=100, description="Contact phone number")
     email: Optional[EmailStr] = Field(None, description="Contact email")
     image_url: Optional[str] = Field(None, min_length=1, max_length=10000, description="Company image URL")
+    lang: Optional[str] = Field(None, description="Language of the description being updated (es/en)")
 
     @model_validator(mode='after')
-    def check_at_least_one_description(self):
-        if self.description_es is None and self.description_en is None:
-            raise ValueError("At least one description (description_es or description_en) must be provided")
-        return self
+    def validate_description_and_lang(self):
 
+        if self.lang is None:
+                raise ValueError("lang field is required when updating descriptions")
+        if self.lang not in ["es", "en"]:
+                raise ValueError("lang must be either 'es' or 'en'")
+        if not self.description_es and not self.description_en:
+            raise ValueError("At least one description (description_es or description_en) must be provided")
+
+        return self
+            
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -66,7 +73,8 @@ class CompanyUpdate(BaseModel):
                 "address": "Av. Las Rosas 4321",
                 "phone": "+56 9 8765 4321",
                 "email": "nuevo@donpepe.cl",
-                "image_url": "https://example.com/images/panaderia_nueva.jpg"
+                "image_url": "https://example.com/images/panaderia_nueva.jpg",
+                "lang": "es"
             }
         }
     }

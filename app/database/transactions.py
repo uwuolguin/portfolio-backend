@@ -469,7 +469,7 @@ class DB:
     async def search_companies(conn: asyncpg.Connection, query: str, lang: str = "es", limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
         search_query = """
             SELECT company_id, company_name, company_description_es, company_description_en,
-                   address, company_email, product_name_es, product_name_en,
+                   address, company_email, product_name_es, product_name_en,phone,image_url,
                    user_name, user_email, commune_name, ts_rank(search_vector, tsquery) AS rank
             FROM fastapi.company_search, to_tsquery($1,$2) tsquery
             WHERE search_vector @@ tsquery
@@ -488,7 +488,9 @@ class DB:
                 "email": row["company_email"],
                 "product_name": row[f"product_name_{lang}"],
                 "commune_name": row["commune_name"],
-                "relevance_score": float(row["rank"])
+                "relevance_score": float(row["rank"]),
+                "phone": row["phone"],
+                "img_url": row["image_url"]
             }
             for row in rows
         ]
