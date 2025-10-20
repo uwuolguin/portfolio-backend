@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     
     enable_content_moderation: bool = True
     max_file_size: int = 10_000_000
-    allowed_file_types: List[str] = ["image/jpeg", "image/png", "image/webp"]
+    allowed_file_types: List[str] = ["image/jpeg", "image/png"]
     
     api_v1_prefix: str = "/api/v1"
     project_name: str = "Proveo API"
