@@ -52,38 +52,53 @@ async def create_company(
 ):
     try:
         user_uuid = UUID(current_user["sub"])
+        if company_data.lang == "es":
+            description_es, description_en = await translate_field(
+                field_name="company_description",
+                text_es=company_data.description_es,
+                text_en=None
+            )
+        else:
+            description_es, description_en = await translate_field(
+                field_name="company_description",
+                text_es=None,
+                text_en=company_data.description_en
+            )
+        
+        logger.info(
+            "creating_company_with_translation",
+            lang=company_data.lang,
+            original_desc_es=company_data.description_es,
+            original_desc_en=company_data.description_en,
+            final_desc_es=description_es,
+            final_desc_en=description_en
+        )
+        
         company = await DB.create_company(
             conn=db,
             user_uuid=user_uuid,
             product_uuid=company_data.product_uuid,
             commune_uuid=company_data.commune_uuid,
             name=company_data.name,
-            description_es=company_data.description_es,
-            description_en=company_data.description_en,
+            description_es=description_es,
+            description_en=description_en,
             address=company_data.address,
             phone=company_data.phone,
             email=company_data.email,
             image_url=company_data.image_url
         )
-        lang = getattr(company_data, "lang", "es")
-        company["name"] = translate_field(company["name"], lang)
-        company["description"] = translate_field(
-            company["description_es"] if lang == "es" else company["description_en"], lang
-        )
-        company["product_name"] = translate_field(
-            company["product_name_es"] if lang == "es" else company["product_name_en"], lang
-        )
+        
         logger.info("company_created", company_uuid=str(company["uuid"]), user_uuid=str(user_uuid))
         return CompanyResponse(**company)
+        
     except ValueError as e:
-        if "already have a company" in str(e):
+        if "already have a company" in str(e) or "can only create one company" in str(e):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error("create_company_error", error=str(e), exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create company")
-
-
+    
 @router.put("/{company_uuid}", response_model=CompanyResponse)
 async def update_company(
     company_uuid: UUID,
