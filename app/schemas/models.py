@@ -7,7 +7,7 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = {"schema": "fastapi"}
+    __table_args__ = {"schema": "proveo"}
     
     uuid = Column(UUID(as_uuid=True), primary_key=True)
     name = Column(String(100), nullable=False)
@@ -17,7 +17,7 @@ class User(Base):
 
 class Product(Base):
     __tablename__ = "products"
-    __table_args__ = {"schema": "fastapi"}
+    __table_args__ = {"schema": "proveo"}
     
     uuid = Column(UUID(as_uuid=True), primary_key=True)
     name_es = Column(String(100), nullable=False)
@@ -26,7 +26,7 @@ class Product(Base):
 
 class Commune(Base):
     __tablename__ = "communes"
-    __table_args__ = {"schema": "fastapi"}
+    __table_args__ = {"schema": "proveo"}
     
     uuid = Column(UUID(as_uuid=True), primary_key=True)
     name = Column(String(100), nullable=False)
@@ -34,12 +34,12 @@ class Commune(Base):
 
 class Company(Base):
     __tablename__ = "companies"
-    __table_args__ = {"schema": "fastapi"}
+    __table_args__ = {"schema": "proveo"}
     
     uuid = Column(UUID(as_uuid=True), primary_key=True)
-    user_uuid = Column(UUID(as_uuid=True), ForeignKey("fastapi.users.uuid"), nullable=False)
-    product_uuid = Column(UUID(as_uuid=True), ForeignKey("fastapi.products.uuid"), nullable=False)
-    commune_uuid = Column(UUID(as_uuid=True), ForeignKey("fastapi.communes.uuid"), nullable=False)
+    user_uuid = Column(UUID(as_uuid=True), ForeignKey("proveo.users.uuid"), nullable=False)
+    product_uuid = Column(UUID(as_uuid=True), ForeignKey("proveo.products.uuid"), nullable=False)
+    commune_uuid = Column(UUID(as_uuid=True), ForeignKey("proveo.communes.uuid"), nullable=False)
     name = Column(String(100), nullable=False)
     description_es = Column(String(100), nullable=False)
     description_en = Column(String(100), nullable=False)
@@ -52,7 +52,7 @@ class Company(Base):
 
 class UserDeleted(Base):
     __tablename__ = "users_deleted"
-    __table_args__ = {"schema": "fastapi"}
+    __table_args__ = {"schema": "proveo"}
     
     uuid = Column(UUID(as_uuid=True), primary_key=True)
     name = Column(String(100), nullable=False)
@@ -63,7 +63,7 @@ class UserDeleted(Base):
 
 class ProductDeleted(Base):
     __tablename__ = "products_deleted"
-    __table_args__ = {"schema": "fastapi"}
+    __table_args__ = {"schema": "proveo"}
     
     uuid = Column(UUID(as_uuid=True), primary_key=True)
     name_es = Column(String(100), nullable=False)
@@ -73,7 +73,7 @@ class ProductDeleted(Base):
 
 class CommuneDeleted(Base):
     __tablename__ = "communes_deleted"
-    __table_args__ = {"schema": "fastapi"}
+    __table_args__ = {"schema": "proveo"}
     
     uuid = Column(UUID(as_uuid=True), primary_key=True)
     name = Column(String(100), nullable=False)
@@ -82,7 +82,7 @@ class CommuneDeleted(Base):
 
 class CompanyDeleted(Base):
     __tablename__ = "companies_deleted"
-    __table_args__ = {"schema": "fastapi"}
+    __table_args__ = {"schema": "proveo"}
     
     uuid = Column(UUID(as_uuid=True), primary_key=True)
     user_uuid = Column(UUID(as_uuid=True), nullable=False)

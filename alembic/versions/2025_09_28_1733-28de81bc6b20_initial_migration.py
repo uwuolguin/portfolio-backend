@@ -16,7 +16,7 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
-    op.execute("CREATE SCHEMA IF NOT EXISTS fastapi")
+    op.execute("CREATE SCHEMA IF NOT EXISTS proveo")
     op.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
 
     op.create_table(
@@ -25,7 +25,7 @@ def upgrade() -> None:
         sa.Column('name', sa.String(length=100), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.PrimaryKeyConstraint('uuid'),
-        schema='fastapi'
+        schema='proveo'
     )
 
     op.create_table(
@@ -35,7 +35,7 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('deleted_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.PrimaryKeyConstraint('uuid'),
-        schema='fastapi'
+        schema='proveo'
     )
 
     op.create_table(
@@ -55,7 +55,7 @@ def upgrade() -> None:
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('deleted_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.PrimaryKeyConstraint('uuid'),
-        schema='fastapi'
+        schema='proveo'
     )
 
     op.create_table(
@@ -65,7 +65,7 @@ def upgrade() -> None:
         sa.Column('name_en', sa.String(length=100), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.PrimaryKeyConstraint('uuid'),
-        schema='fastapi'
+        schema='proveo'
     )
 
     op.create_table(
@@ -76,7 +76,7 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('deleted_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.PrimaryKeyConstraint('uuid'),
-        schema='fastapi'
+        schema='proveo'
     )
 
     op.create_table(
@@ -88,7 +88,7 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.PrimaryKeyConstraint('uuid'),
         sa.UniqueConstraint('email'),
-        schema='fastapi'
+        schema='proveo'
     )
 
     op.create_table(
@@ -100,7 +100,7 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('deleted_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.PrimaryKeyConstraint('uuid'),
-        schema='fastapi'
+        schema='proveo'
     )
 
     op.create_table(
@@ -118,9 +118,22 @@ def upgrade() -> None:
         sa.Column('image_url', sa.String(length=10000), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-        sa.ForeignKeyConstraint(['commune_uuid'], ['fastapi.communes.uuid']),
-        sa.ForeignKeyConstraint(['product_uuid'], ['fastapi.products.uuid']),
-        sa.ForeignKeyConstraint(['user_uuid'], ['fastapi.users.uuid']),
+        sa.ForeignKeyConstraint(['commune_uuid'], ['proveo.communes.uuid']),
+        sa.ForeignKeyConstraint(['product_uuid'], ['proveo.products.uuid']),
+        sa.ForeignKeyConstraint(['user_uuid'], ['proveo.users.uuid']),
         sa.PrimaryKeyConstraint('uuid'),
-        schema='fastapi'
+        schema='proveo'
     )
+def downgrade() -> None:
+    """Downgrade schema - drop all tables and schema"""
+    op.drop_table('companies', schema='proveo')
+    op.drop_table('users_deleted', schema='proveo')
+    op.drop_table('users', schema='proveo')
+    op.drop_table('products_deleted', schema='proveo')
+    op.drop_table('products', schema='proveo')
+    op.drop_table('companies_deleted', schema='proveo')
+    op.drop_table('communes_deleted', schema='proveo')
+    op.drop_table('communes', schema='proveo')
+    
+    op.execute("DROP SCHEMA IF EXISTS proveo CASCADE")
+    

@@ -15,10 +15,11 @@ down_revision: Union[str, Sequence[str], None] = '28de81bc6b20'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+
 def upgrade() -> None:
-    op.execute("DROP MATERIALIZED VIEW IF EXISTS fastapi.company_search;")
+    op.execute("DROP MATERIALIZED VIEW IF EXISTS proveo.company_search;")
     op.execute("""
-    CREATE MATERIALIZED VIEW fastapi.company_search AS
+    CREATE MATERIALIZED VIEW proveo.company_search AS
     SELECT 
         c.uuid AS company_id,
         c.name AS company_name,
@@ -47,16 +48,13 @@ def upgrade() -> None:
             coalesce(c.description_en,'') || ' ' ||
             coalesce(p.name_en,'')
         ) AS search_vector
-    FROM fastapi.companies c
-    LEFT JOIN fastapi.products p ON p.uuid = c.product_uuid
-    LEFT JOIN fastapi.users u ON u.uuid = c.user_uuid
-    LEFT JOIN fastapi.communes cm ON cm.uuid = c.commune_uuid;
+    FROM proveo.companies c
+    LEFT JOIN proveo.products p ON p.uuid = c.product_uuid
+    LEFT JOIN proveo.users u ON u.uuid = c.user_uuid
+    LEFT JOIN proveo.communes cm ON cm.uuid = c.commune_uuid;
     """)
     op.execute("""
     CREATE INDEX idx_company_search_vector
-    ON fastapi.company_search
+    ON proveo.company_search
     USING GIN (search_vector);
     """)
-
-def downgrade() -> None:
-    op.execute("DROP MATERIALIZED VIEW IF EXISTS fastapi.company_search CASCADE;")

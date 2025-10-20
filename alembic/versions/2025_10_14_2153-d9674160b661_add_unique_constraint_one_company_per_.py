@@ -23,7 +23,7 @@ def upgrade() -> None:
         'uq_companies_user_uuid', 
         'companies',              
         ['user_uuid'],             
-        schema='fastapi'
+        schema='proveo'
     )
 
 
@@ -31,5 +31,5 @@ def downgrade() -> None:
     op.drop_constraint(
         'uq_companies_user_uuid',
         'companies',
-        schema='fastapi'
+        schema='proveo'
     )
