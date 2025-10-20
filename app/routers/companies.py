@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request,Query
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request,Query,Form
 from typing import List, Optional
 from uuid import UUID
 import asyncpg
 from app.database.connection import get_db
 from app.database.transactions import DB
 from app.auth.dependencies import get_current_user, verify_csrf
-from app.schemas.companies import CompanyCreate, CompanyUpdate, CompanyResponse, CompanySearchResponse
+from app.schemas.companies import CompanyResponse, CompanySearchResponse
 from app.utils.translator import translate_field
 from app.utils.file_handler import FileHandler
 import structlog
@@ -45,7 +45,15 @@ async def search_companies(
 @router.post("/", response_model=CompanyResponse, status_code=status.HTTP_201_CREATED)
 async def create_company(
     request: Request,
-    form_data: CompanyCreate = Depends(CompanyCreate.as_form),
+    name: str = Form(..., min_length=1, max_length=100),
+    product_uuid: UUID = Form(...),
+    commune_uuid: UUID = Form(...),
+    description_es: Optional[str] = Form(None, max_length=100),
+    description_en: Optional[str] = Form(None, max_length=100),
+    address: str = Form(..., min_length=5, max_length=100),
+    phone: str = Form(...,max_length=100),
+    email: str = Form(..., max_length=100),
+    lang: str = Form(..., pattern="^(es|en)$"),
     image: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
     db: asyncpg.Connection = Depends(get_db),
@@ -53,126 +61,80 @@ async def create_company(
 ):
     try:
         user_uuid = UUID(current_user["sub"])
-
-        if form_data.lang == "es":
-            description_es, description_en = await translate_field(
-                field_name="company_description",
-                text_es=form_data.description_es,
-                text_en=None
-            )
+        if not description_es and not description_en:
+            raise HTTPException(status_code=400, detail="At least one description must be provided")
+        if lang == "es":
+            description_es, description_en = await translate_field("company_description", description_es, None)
         else:
-            description_es, description_en = await translate_field(
-                field_name="company_description",
-                text_es=None,
-                text_en=form_data.description_en
-            )
-
+            description_es, description_en = await translate_field("company_description", None, description_en)
         image_path = await FileHandler.save_image(image)
-
         try:
             company = await DB.create_company(
-                conn=db,
-                user_uuid=user_uuid,
-                product_uuid=form_data.product_uuid,
-                commune_uuid=form_data.commune_uuid,
-                name=form_data.name,
-                description_es=description_es,
-                description_en=description_en,
-                address=form_data.address,
-                phone=form_data.phone,
-                email=form_data.email,
-                image_url=image_path
+                conn=db, user_uuid=user_uuid, product_uuid=product_uuid, commune_uuid=commune_uuid,
+                name=name, description_es=description_es, description_en=description_en,
+                address=address, phone=phone, email=email, image_url=image_path
             )
-
             response_data = dict(company)
             response_data["image_url"] = FileHandler.get_image_url(image_path, str(request.base_url).rstrip('/'))
-
-            logger.info("company_created", company_uuid=str(company["uuid"]), user_uuid=str(user_uuid))
             return CompanyResponse(**response_data)
-
         except Exception as db_error:
             FileHandler.delete_image(image_path)
             raise db_error
-
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("create_company_error", error=str(e), exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create company")
+        raise HTTPException(status_code=500, detail="Failed to create company")
 
 
 @router.put("/{company_uuid}", response_model=CompanyResponse)
 async def update_company(
     company_uuid: UUID,
     request: Request,
-    form_data: CompanyUpdate = Depends(CompanyUpdate.as_form),
+    name: str = Form(..., min_length=1, max_length=100),
+    product_uuid: UUID = Form(...),
+    commune_uuid: UUID = Form(...),
+    description_es: Optional[str] = Form(None, max_length=100),
+    description_en: Optional[str] = Form(None, max_length=100),
+    address: str = Form(..., min_length=5, max_length=100),
+    phone: str = Form(...,max_length=100),
+    email: str = Form(..., max_length=100),
+    lang: Optional[str] = Form(None, pattern="^(es|en)$"),
     image: Optional[UploadFile] = File(None),
     current_user: dict = Depends(get_current_user),
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
-    """
-    Update company. All fields are optional. If image is provided, old image will be replaced.
-    """
     try:
         user_uuid = UUID(current_user["sub"])
-
-        final_description_es = form_data.description_es
-        final_description_en = form_data.description_en
-
-        if (form_data.description_es or form_data.description_en) and form_data.lang:
-            if form_data.lang == "es":
-                final_description_es, final_description_en = await translate_field(
-                    field_name="company_description",
-                    text_es=form_data.description_es,
-                    text_en=None
-                )
+        final_description_es = description_es
+        final_description_en = description_en
+        if (description_es or description_en) and lang:
+            if lang == "es":
+                final_description_es, final_description_en = await translate_field("company_description", description_es, None)
             else:
-                final_description_es, final_description_en = await translate_field(
-                    field_name="company_description",
-                    text_es=None,
-                    text_en=form_data.description_en
-                )
-
+                final_description_es, final_description_en = await translate_field("company_description", None, description_en)
         new_image_path = None
         old_image_path = None
         if image:
             old_company = await DB.get_company_by_uuid(conn=db, company_uuid=company_uuid)
             if old_company:
                 old_image_path = old_company.get("image_url")
-
             new_image_path = await FileHandler.save_image(image, str(company_uuid))
-            logger.info("company_image_updated", company_uuid=str(company_uuid))
-
         company = await DB.update_company_by_uuid(
-            conn=db,
-            company_uuid=company_uuid,
-            user_uuid=user_uuid,
-            name=form_data.name,
-            description_es=final_description_es,
-            description_en=final_description_en,
-            address=form_data.address,
-            phone=form_data.phone,
-            email=form_data.email,
-            image_url=new_image_path,
-            product_uuid=form_data.product_uuid,
-            commune_uuid=form_data.commune_uuid
+            conn=db, company_uuid=company_uuid, user_uuid=user_uuid,
+            name=name, description_es=final_description_es, description_en=final_description_en,
+            address=address, phone=phone, email=email, image_url=new_image_path,
+            product_uuid=product_uuid, commune_uuid=commune_uuid
         )
-
         if new_image_path and old_image_path and old_image_path != new_image_path:
             FileHandler.delete_image(old_image_path)
-
         response_data = dict(company)
         response_data["image_url"] = FileHandler.get_image_url(company["image_url"], str(request.base_url).rstrip('/'))
-
-        logger.info("company_updated", company_uuid=str(company_uuid), user_uuid=str(user_uuid))
         return CompanyResponse(**response_data)
-
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("update_company_error", error=str(e), exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update company")
+        raise HTTPException(status_code=500, detail="Failed to update company")
 
 @router.delete("/{company_uuid}", status_code=status.HTTP_200_OK)
 async def delete_company(
