@@ -158,13 +158,6 @@ class DB:
 
     @staticmethod
     @db_retry()
-    async def get_product_by_uuid(conn: asyncpg.Connection, product_uuid: UUID) -> Optional[Dict[str, Any]]:
-        query = "SELECT uuid,name_es,name_en,created_at FROM fastapi.products WHERE uuid=$1"
-        row = await conn.fetchrow(query, product_uuid)
-        return dict(row) if row else None
-
-    @staticmethod
-    @db_retry()
     async def create_product(conn: asyncpg.Connection, name_es: str, name_en: str, user_email: str) -> Dict[str, Any]:
         if not DB.is_admin(user_email):
             raise PermissionError("Only admin users can create products")

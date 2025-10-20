@@ -3,7 +3,7 @@ import asyncpg
 import structlog
 import ssl
 import logging
-from typing import AsyncGenerator, Optional, Dict, Any
+from typing import AsyncGenerator, Optional
 from contextlib import asynccontextmanager
 from app.config import settings
 
@@ -83,16 +83,6 @@ class DatabasePoolManager:
             await self.write_pool.close()
         logger.info("database_pool_closed")
     
-    def get_pool_stats(self) -> Dict[str, Any]:
-        stats = {}
-        if self.write_pool:
-            stats["write_pool"] = {
-                "size": self.write_pool.get_size(),
-                "min_size": self.write_pool.get_min_size(),
-                "max_size": self.write_pool.get_max_size(),
-                "idle_connections": self.write_pool.get_idle_size(),
-            }
-        return stats
 
 pool_manager = DatabasePoolManager()
 
