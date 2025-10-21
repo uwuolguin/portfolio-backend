@@ -1,4 +1,6 @@
+# app/routers/users.py
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Query
+from fastapi.responses import HTMLResponse
 from typing import List
 import asyncpg
 from datetime import timedelta
@@ -10,6 +12,11 @@ from app.auth.jwt import verify_password, create_access_token
 from app.auth.csrf import generate_csrf_token
 from app.auth.dependencies import get_current_user, verify_csrf, require_admin
 from app.services.email import email_service
+from app.templates.email_verification import ( 
+    verification_success_page,
+    verification_error_page,
+    verification_server_error_page
+)
 from app.config import settings
 import structlog
 
@@ -27,7 +34,6 @@ async def signup(user_data: UserSignup, db: asyncpg.Connection = Depends(get_db)
             password=user_data.password
         )
         
-        # Send verification email (don't block signup if email fails)
         verification_token = user.get('verification_token')
         if verification_token:
             await email_service.send_verification_email(
@@ -36,7 +42,6 @@ async def signup(user_data: UserSignup, db: asyncpg.Connection = Depends(get_db)
                 user_name=user['name']
             )
         
-        # Remove token from response
         user.pop('verification_token', None)
         
         return UserResponse(**user)
@@ -51,26 +56,19 @@ async def signup(user_data: UserSignup, db: asyncpg.Connection = Depends(get_db)
         )
 
 
-@router.get("/verify-email/{token}")
+@router.get("/verify-email/{token}", response_class=HTMLResponse)
 async def verify_email(token: str, db: asyncpg.Connection = Depends(get_db)):
-    """Verify user email with token from email link"""
+    """Verify user email with token from email link - returns HTML page"""
     try:
         user = await DB.verify_email(conn=db, token=token)
-        return {
-            "message": "✅ Email verified successfully! You can now log in.",
-            "email": user['email']
-        }
+        return verification_success_page(user['email'])  # ← Clean!
+        
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        return verification_error_page(str(e))  # ← Clean!
+        
     except Exception as e:
         logger.error("email_verification_error", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to verify email"
-        )
+        return verification_server_error_page()  # ← Clean!
 
 
 @router.post("/resend-verification")
@@ -115,7 +113,6 @@ async def login(user_data: UserLogin, response: Response, db: asyncpg.Connection
             detail="Incorrect email or password"
         )
     
-    # Include role and email_verified in JWT
     jwt_payload = {
         "sub": str(user["uuid"]),
         "name": user["name"],
@@ -239,7 +236,7 @@ async def delete_me(
 async def get_all_users(
     limit: int = Query(100, ge=1, le=500), 
     offset: int = Query(0, ge=0), 
-    current_user: dict = Depends(require_admin),  # ← Changed!
+    current_user: dict = Depends(require_admin),
     db: asyncpg.Connection = Depends(get_db)
 ):
     try:
@@ -260,7 +257,7 @@ async def get_all_users(
 @router.delete("/admin/users/{user_uuid}/use-postman-or-similar-to-send-csrf", status_code=status.HTTP_200_OK)
 async def admin_delete_user(
     user_uuid: UUID, 
-    current_user: dict = Depends(require_admin),  # ← Changed!
+    current_user: dict = Depends(require_admin),
     db: asyncpg.Connection = Depends(get_db), 
     _: None = Depends(verify_csrf)
 ):
