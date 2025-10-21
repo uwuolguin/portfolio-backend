@@ -42,8 +42,12 @@ class Settings(BaseSettings):
     db_retry_wait_multiplier: float = 0.5
     db_retry_max_wait: float = 5.0
     
-
+    verification_token_email_time: int = 30
     admin_email: str
+
+    resend_api_key: str
+    email_from: str = "noreply@proveo.com"
+    frontend_url: str = "http://localhost:3000"
 
     class Config:
         env_file = ".env"

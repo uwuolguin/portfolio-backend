@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey,Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
@@ -13,6 +13,10 @@ class User(Base):
     name = Column(String(100), nullable=False)
     email = Column(String(100), nullable=False, unique=True)
     hashed_password = Column(Text, nullable=False)
+    role = Column(String(20), nullable=False, server_default='user')
+    email_verified = Column(Boolean, nullable=False, server_default='false')
+    verification_token = Column(Text, nullable=True) 
+    verification_token_expires = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 class Product(Base):
@@ -58,6 +62,8 @@ class UserDeleted(Base):
     name = Column(String(100), nullable=False)
     email = Column(String(100), nullable=False)
     hashed_password = Column(Text, nullable=False)
+    role = Column(String(20), nullable=False, server_default='user')  
+    email_verified = Column(Boolean, nullable=False, server_default='false') 
     created_at = Column(DateTime(timezone=True), nullable=False)
     deleted_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 

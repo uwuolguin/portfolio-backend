@@ -8,6 +8,8 @@ from app.utils.db_retry import db_retry
 from app.auth.jwt import get_password_hash
 from app.config import settings
 import uuid
+from app.auth.csrf import generate_csrf_token
+from datetime import datetime,timedelta,timezone
 
 logger = structlog.get_logger(__name__)
 
@@ -38,6 +40,7 @@ async def transaction(
         raise
 
 class DB:
+
     @staticmethod
     @db_retry()
     async def create_user(conn: asyncpg.Connection, name: str, email: str, password: str) -> Dict[str, Any]:
@@ -45,42 +48,134 @@ class DB:
             existing = await conn.fetchval("SELECT 1 FROM proveo.users WHERE email = $1", email)
             if existing:
                 raise ValueError(f"Email {email} is already registered")
+            
             hashed_password = get_password_hash(password)
             user_uuid = str(uuid.uuid4())
+            
+            verification_token = generate_csrf_token()
+            token_expires = datetime.now(timezone.utc) + timedelta(hours=settings.verification_token_email_time)
+            
             query = """
-                INSERT INTO proveo.users (uuid, name, email, hashed_password)
-                VALUES ($1, $2, $3, $4)
-                RETURNING uuid, name, email, created_at
+                INSERT INTO proveo.users 
+                    (uuid, name, email, hashed_password, role, verification_token, verification_token_expires)
+                VALUES ($1, $2, $3, $4, 'user', $5, $6)
+                RETURNING uuid, name, email, role, email_verified, verification_token, created_at
             """
-            row = await conn.fetchrow(query, user_uuid, name, email, hashed_password)
-            logger.info("user_created", user_uuid=str(row["uuid"]), email=email)
+            row = await conn.fetchrow(
+                query, user_uuid, name, email, hashed_password, 
+                verification_token, token_expires
+            )
+            
+            logger.info("user_created_pending_verification", 
+                       user_uuid=str(row["uuid"]), 
+                       email=email)
             return dict(row)
-
+        
     @staticmethod
     @db_retry()
     async def get_user_by_email(conn: asyncpg.Connection, email: str) -> Optional[Dict[str, Any]]:
-        query = "SELECT uuid, name, email, hashed_password, created_at FROM proveo.users WHERE email = $1"
+        query = """
+            SELECT uuid, name, email, hashed_password, role, email_verified, created_at 
+            FROM proveo.users 
+            WHERE email = $1
+        """
         row = await conn.fetchrow(query, email)
         return dict(row) if row else None
-
+    
+    @staticmethod
+    @db_retry()
+    async def verify_email(conn: asyncpg.Connection, token: str) -> Dict[str, Any]:
+        """Verify user email with token"""
+        async with transaction(conn):
+            query = """
+                SELECT uuid, name, email, verification_token_expires
+                FROM proveo.users
+                WHERE verification_token = $1 AND email_verified = FALSE
+            """
+            user = await conn.fetchrow(query, token)
+            
+            if not user:
+                raise ValueError("Invalid or expired verification token")
+            
+            if user['verification_token_expires'] < datetime.now(timezone.utc):
+                raise ValueError("Verification token has expired")
+            
+            update_query = """
+                UPDATE proveo.users
+                SET email_verified = TRUE,
+                    verification_token = NULL,
+                    verification_token_expires = NULL
+                WHERE uuid = $1
+                RETURNING uuid, name, email, role, email_verified
+            """
+            verified_user = await conn.fetchrow(update_query, user['uuid'])
+            
+            logger.info("email_verified", user_uuid=str(user['uuid']), email=user['email'])
+            return dict(verified_user)
+        
+    @staticmethod
+    @db_retry()
+    async def resend_verification_email(conn: asyncpg.Connection, email: str) -> Dict[str, Any]:
+        """Generate new verification token for user"""
+        async with transaction(conn):
+            query = """
+                SELECT uuid, name, email, email_verified
+                FROM proveo.users
+                WHERE email = $1
+            """
+            user = await conn.fetchrow(query, email)
+            
+            if not user:
+                raise ValueError("User not found")
+            
+            if user['email_verified']:
+                raise ValueError("Email already verified")
+            
+            verification_token = generate_csrf_token()
+            token_expires = datetime.now(timezone.utc) + timedelta(hours=settings.verification_token_email_time)
+            
+            update_query = """
+                UPDATE proveo.users
+                SET verification_token = $1,
+                    verification_token_expires = $2
+                WHERE uuid = $3
+                RETURNING uuid, name, email, verification_token
+            """
+            updated_user = await conn.fetchrow(
+                update_query, verification_token, token_expires, user['uuid']
+            )
+            
+            logger.info("verification_token_regenerated", 
+                       user_uuid=str(user['uuid']), 
+                       email=email)
+            return dict(updated_user)
+    
     @staticmethod
     @db_retry()
     async def delete_user_by_uuid(conn: asyncpg.Connection, user_uuid: UUID) -> Dict[str, Any]:
         async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
-            user_query = "SELECT uuid, name, email, hashed_password, created_at FROM proveo.users WHERE uuid = $1"
+            user_query = """
+                SELECT uuid, name, email, hashed_password, role, email_verified, created_at 
+                FROM proveo.users 
+                WHERE uuid = $1
+            """
             user = await conn.fetchrow(user_query, user_uuid)
             if not user:
                 raise ValueError(f"User with UUID {user_uuid} not found")
+            
             companies_query = """
-                SELECT uuid, user_uuid, product_uuid, commune_uuid, name, description_es, description_en, address, phone, email, image_url, created_at, updated_at
+                SELECT uuid, user_uuid, product_uuid, commune_uuid, name, description_es, 
+                       description_en, address, phone, email, image_url, created_at, updated_at
                 FROM proveo.companies
                 WHERE user_uuid = $1
             """
             companies = await conn.fetch(companies_query, user_uuid)
+            
             if companies:
                 delete_companies_query = """
                     INSERT INTO proveo.companies_deleted 
-                        (uuid, user_uuid, product_uuid, commune_uuid, name, description_es, description_en, address, phone, email, image_url, created_at, updated_at)
+                        (uuid, user_uuid, product_uuid, commune_uuid, name, description_es, 
+                         description_en, address, phone, email, image_url, created_at, updated_at)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                 """
                 for company in companies:
@@ -94,12 +189,29 @@ class DB:
                 await conn.execute("DELETE FROM proveo.companies WHERE user_uuid = $1", user_uuid)
                 await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
                 logger.info("user_companies_deleted", user_uuid=str(user_uuid), companies_count=len(companies))
-            insert_deleted_user = "INSERT INTO proveo.users_deleted (uuid,name,email,hashed_password,created_at) VALUES ($1,$2,$3,$4,$5)"
-            await conn.execute(insert_deleted_user, user["uuid"], user["name"], user["email"], user["hashed_password"], user["created_at"])
+            
+            insert_deleted_user = """
+                INSERT INTO proveo.users_deleted 
+                    (uuid, name, email, hashed_password, role, email_verified, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """
+            await conn.execute(insert_deleted_user, 
+                user["uuid"], user["name"], user["email"], user["hashed_password"],
+                user["role"], user["email_verified"], user["created_at"]
+            )
+            
             await conn.execute("DELETE FROM proveo.users WHERE uuid = $1", user_uuid)
-            logger.info("user_deleted_with_cascade", user_uuid=str(user_uuid), email=user["email"], companies_deleted=len(companies))
-            return {"user_uuid": str(user_uuid), "email": user["email"], "companies_deleted": len(companies)}
-
+            
+            logger.info("user_deleted_with_cascade", 
+                       user_uuid=str(user_uuid), 
+                       email=user["email"], 
+                       companies_deleted=len(companies))
+            return {
+                "user_uuid": str(user_uuid), 
+                "email": user["email"], 
+                "companies_deleted": len(companies)
+            }
+        
     @staticmethod
     @db_retry()
     async def get_all_users_with_company_count(conn: asyncpg.Connection, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -114,22 +226,34 @@ class DB:
         rows = await conn.fetch(query, limit, offset)
         return [dict(row) for row in rows]
 
+    
     @staticmethod
     @db_retry()
     async def admin_delete_user_by_uuid(conn: asyncpg.Connection, user_uuid: UUID, admin_email: str) -> Dict[str, Any]:
-        if not DB.is_admin(admin_email):
+        admin_user = await conn.fetchrow(
+            "SELECT role FROM proveo.users WHERE email = $1", 
+            admin_email
+        )
+        if not admin_user or admin_user['role'] != 'admin':
             raise PermissionError("Only admin users can delete other users.")
+        
         async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
-            user_query = "SELECT uuid,name,email,hashed_password,created_at FROM proveo.users WHERE uuid=$1"
+            user_query = """
+                SELECT uuid, name, email, hashed_password, role, email_verified, created_at
+                FROM proveo.users WHERE uuid=$1
+            """
             user = await conn.fetchrow(user_query, user_uuid)
             if not user:
                 raise ValueError(f"User with UUID {user_uuid} not found")
+            
             companies_query = "SELECT * FROM proveo.companies WHERE user_uuid=$1"
             companies = await conn.fetch(companies_query, user_uuid)
+            
             if companies:
                 delete_companies_query = """
                     INSERT INTO proveo.companies_deleted
-                        (uuid, user_uuid, product_uuid, commune_uuid, name, description_es, description_en, address, phone, email, image_url, created_at, updated_at)
+                        (uuid, user_uuid, product_uuid, commune_uuid, name, description_es, 
+                         description_en, address, phone, email, image_url, created_at, updated_at)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                 """
                 for company in companies:
@@ -141,14 +265,34 @@ class DB:
                         company["updated_at"]
                     )
                 await conn.execute("DELETE FROM proveo.companies WHERE user_uuid=$1", user_uuid)
-                logger.info("admin_deleted_user_companies", user_uuid=str(user_uuid), companies_count=len(companies), admin_email=admin_email)
-            insert_deleted_user = "INSERT INTO proveo.users_deleted (uuid,name,email,hashed_password,created_at) VALUES ($1,$2,$3,$4,$5)"
-            await conn.execute(insert_deleted_user, user["uuid"], user["name"], user["email"], user["hashed_password"], user["created_at"])
+                logger.info("admin_deleted_user_companies", 
+                           user_uuid=str(user_uuid), 
+                           companies_count=len(companies), 
+                           admin_email=admin_email)
+            
+            insert_deleted_user = """
+                INSERT INTO proveo.users_deleted 
+                    (uuid, name, email, hashed_password, role, email_verified, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """
+            await conn.execute(insert_deleted_user, 
+                user["uuid"], user["name"], user["email"], user["hashed_password"],
+                user["role"], user["email_verified"], user["created_at"]
+            )
+            
             await conn.execute("DELETE FROM proveo.users WHERE uuid=$1", user_uuid)
-            logger.info("admin_deleted_user_with_cascade", deleted_user_uuid=str(user_uuid), deleted_user_email=user["email"], companies_deleted=len(companies), admin_email=admin_email)
+            logger.info("admin_deleted_user_with_cascade", 
+                       deleted_user_uuid=str(user_uuid), 
+                       deleted_user_email=user["email"], 
+                       companies_deleted=len(companies), 
+                       admin_email=admin_email)
             await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
-            return {"user_uuid": str(user_uuid), "email": user["email"], "companies_deleted": len(companies)}
-
+            return {
+                "user_uuid": str(user_uuid), 
+                "email": user["email"], 
+                "companies_deleted": len(companies)
+            }
+        
     @staticmethod
     @db_retry()
     async def get_all_products(conn: asyncpg.Connection, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -159,8 +303,12 @@ class DB:
     @staticmethod
     @db_retry()
     async def create_product(conn: asyncpg.Connection, name_es: str, name_en: str, user_email: str) -> Dict[str, Any]:
-        if not DB.is_admin(user_email):
-            raise PermissionError("Only admin users can create products")
+        admin_user = await conn.fetchrow(
+            "SELECT role FROM proveo.users WHERE email = $1", 
+            user_email
+        )
+        if not admin_user or admin_user['role'] != 'admin':
+            raise PermissionError("Only admin users can delete other users.")
         async with transaction(conn):
             existing = await conn.fetchval("SELECT 1 FROM proveo.products WHERE name_en=$1 OR name_es=$2", name_en, name_es)
             if existing:
@@ -174,8 +322,12 @@ class DB:
     @staticmethod
     @db_retry()
     async def update_product_by_uuid(conn: asyncpg.Connection, product_uuid: UUID, name_es: Optional[str], name_en: Optional[str], user_email: str) -> Dict[str, Any]:
-        if not DB.is_admin(user_email):
-            raise PermissionError("Only admin users can update products")
+        admin_user = await conn.fetchrow(
+            "SELECT role FROM proveo.users WHERE email = $1", 
+            user_email
+        )
+        if not admin_user or admin_user['role'] != 'admin':
+            raise PermissionError("Only admin users can delete other users.")
         async with transaction(conn):
             existing = await conn.fetchval("SELECT 1 FROM proveo.products WHERE uuid=$1", product_uuid)
             if not existing:
@@ -203,8 +355,12 @@ class DB:
     @staticmethod
     @db_retry()
     async def delete_product_by_uuid(conn: asyncpg.Connection, product_uuid: UUID, user_email: str) -> Dict[str, Any]:
-        if not DB.is_admin(user_email):
-            raise PermissionError("Only admin users can delete products.")
+        admin_user = await conn.fetchrow(
+            "SELECT role FROM proveo.users WHERE email = $1", 
+            user_email
+        )
+        if not admin_user or admin_user['role'] != 'admin':
+            raise PermissionError("Only admin users can delete other users.")
         async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
             product_query = "SELECT uuid,name_es,name_en,created_at FROM proveo.products WHERE uuid=$1"
             product = await conn.fetchrow(product_query, product_uuid)
@@ -230,8 +386,12 @@ class DB:
     @staticmethod
     @db_retry()
     async def create_commune(conn: asyncpg.Connection, name: str, user_email: str) -> Dict[str, Any]:
-        if not DB.is_admin(user_email):
-            raise PermissionError("Only admin users can create communes")
+        admin_user = await conn.fetchrow(
+            "SELECT role FROM proveo.users WHERE email = $1", 
+            user_email
+        )
+        if not admin_user or admin_user['role'] != 'admin':
+            raise PermissionError("Only admin users can delete other users.")
         async with transaction(conn):
             existing = await conn.fetchval("SELECT 1 FROM proveo.communes WHERE name=$1", name)
             if existing:
@@ -245,8 +405,12 @@ class DB:
     @staticmethod
     @db_retry()
     async def update_commune_by_uuid(conn: asyncpg.Connection, commune_uuid: UUID, name: Optional[str], user_email: str) -> Dict[str, Any]:
-        if not DB.is_admin(user_email):
-            raise PermissionError("Only admin users can update communes")
+        admin_user = await conn.fetchrow(
+            "SELECT role FROM proveo.users WHERE email = $1", 
+            user_email
+        )
+        if not admin_user or admin_user['role'] != 'admin':
+            raise PermissionError("Only admin users can delete other users.")
         async with transaction(conn):
             existing = await conn.fetchval("SELECT 1 FROM proveo.communes WHERE uuid=$1", commune_uuid)
             if not existing:
@@ -262,8 +426,12 @@ class DB:
     @staticmethod
     @db_retry()
     async def delete_commune_by_uuid(conn: asyncpg.Connection, commune_uuid: UUID, user_email: str) -> Dict[str, Any]:
-        if not DB.is_admin(user_email):
-            raise PermissionError("Only admin users can delete communes.")
+        admin_user = await conn.fetchrow(
+            "SELECT role FROM proveo.users WHERE email = $1", 
+            user_email
+        )
+        if not admin_user or admin_user['role'] != 'admin':
+            raise PermissionError("Only admin users can delete other users.")
         async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
             commune_query = "SELECT uuid,name,created_at FROM proveo.communes WHERE uuid=$1"
             commune = await conn.fetchrow(commune_query, commune_uuid)
@@ -513,8 +681,12 @@ class DB:
     @staticmethod
     @db_retry()
     async def admin_delete_company_by_uuid(conn: asyncpg.Connection, company_uuid: UUID, admin_email: str) -> Dict[str, Any]:
-        if not DB.is_admin(admin_email):
-            raise PermissionError("Only admin users can delete any company.")
+        admin_user = await conn.fetchrow(
+            "SELECT role FROM proveo.users WHERE email = $1", 
+            admin_email
+        )
+        if not admin_user or admin_user['role'] != 'admin':
+            raise PermissionError("Only admin users can delete other users.")
 
         async with transaction(conn):
             company_query = "SELECT * FROM proveo.companies WHERE uuid=$1"
@@ -540,6 +712,3 @@ class DB:
                 "image_url": company["image_url"] 
             }
 
-    @staticmethod
-    def is_admin(email: str) -> bool:
-        return email.lower() == settings.admin_email.lower()
