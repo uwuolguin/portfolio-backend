@@ -5,7 +5,7 @@ from datetime import datetime
 class UserSignup(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="User's full name")
     email: EmailStr = Field(..., description="User's email address")
-    password: str = Field(..., min_length=8, max_length=100, description="User's password (min 8 chars)")  # ← Improved!
+    password: str = Field(..., min_length=8, max_length=100, description="User's password (min 8 chars)") 
 
     model_config = {
         "json_schema_extra": {
@@ -22,8 +22,8 @@ class UserResponse(BaseModel):
     uuid: UUID
     name: str
     email: str
-    role: str = "user"  # NEW
-    email_verified: bool = False  # NEW
+    role: str = "user" 
+    email_verified: bool = False
     created_at: datetime
 
     model_config = {
@@ -56,7 +56,7 @@ class UserLogin(BaseModel):
 
 class LoginResponse(BaseModel):
     message: str = Field(..., description="Success message")
-    csrf_token: str = Field(..., description="CSRF token for subsequent requests")  # NEW - expose it!
+    csrf_token: str = Field(..., description="CSRF token for subsequent requests") 
     user: dict = Field(..., description="User information")
 
     model_config = {
@@ -77,10 +77,10 @@ class AdminUserResponse(BaseModel):
     uuid: UUID
     name: str
     email: str
-    role: str = "user"  # NEW
-    email_verified: bool = False  # NEW
+    role: str = "user" 
+    email_verified: bool = False 
     created_at: datetime
-    company_count: int = 0  # Number of companies owned
+    company_count: int = 0  
 
     model_config = {
         "json_schema_extra": {

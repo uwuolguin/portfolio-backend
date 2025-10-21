@@ -1,4 +1,3 @@
-# app/templates/email_verification.py
 """HTML templates for email verification responses"""
 
 def verification_success_page(email: str) -> str:

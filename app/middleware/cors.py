@@ -1,4 +1,3 @@
-# app/middleware/cors.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
@@ -12,7 +11,7 @@ def setup_cors(app: FastAPI) -> None:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
-        allow_credentials=True,  # Important for cookies (JWT)
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
         allow_headers=[
             "Content-Type",
@@ -21,5 +20,5 @@ def setup_cors(app: FastAPI) -> None:
             "X-CSRF-Token"
         ],
         expose_headers=["X-Correlation-ID"],
-        max_age=600,  # Cache preflight requests for 10 minutes
+        max_age=600,  
     )

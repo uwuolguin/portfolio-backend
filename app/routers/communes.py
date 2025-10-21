@@ -1,11 +1,10 @@
-# app/routers/communes.py
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import List
 from uuid import UUID
 import asyncpg
 from app.database.connection import get_db
 from app.database.transactions import DB
-from app.auth.dependencies import get_current_user, verify_csrf, require_admin  # ← Add require_admin
+from app.auth.dependencies import  verify_csrf, require_admin
 from app.schemas.communes import CommuneCreate, CommuneUpdate, CommuneResponse
 import structlog
 
@@ -48,7 +47,7 @@ async def list_communes(
 )
 async def create_commune(
     commune_data: CommuneCreate,
-    current_user: dict = Depends(require_admin),  # ← Changed!
+    current_user: dict = Depends(require_admin), 
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
@@ -80,7 +79,7 @@ async def create_commune(
 async def update_commune(
     commune_uuid: UUID,
     commune_data: CommuneUpdate,
-    current_user: dict = Depends(require_admin),  # ← Changed!
+    current_user: dict = Depends(require_admin), 
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
@@ -112,7 +111,7 @@ async def update_commune(
 )
 async def delete_commune(
     commune_uuid: UUID,
-    current_user: dict = Depends(require_admin),  # ← Changed!
+    current_user: dict = Depends(require_admin),  
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):

@@ -5,7 +5,7 @@ import asyncpg
 from app.database.connection import get_db
 from app.database.transactions import DB
 from app.utils.translator import translate_field
-from app.auth.dependencies import get_current_user, verify_csrf, require_admin  # ← Add require_admin
+from app.auth.dependencies import verify_csrf, require_admin 
 from app.schemas.products import ProductCreate, ProductUpdate, ProductResponse
 import structlog
 
@@ -34,7 +34,7 @@ async def list_products(
 @router.post("/use-postman-or-similar-to-send-csrf", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
 async def create_product(
     product_data: ProductCreate,
-    current_user: dict = Depends(require_admin),  # ← Changed!
+    current_user: dict = Depends(require_admin), 
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
@@ -80,7 +80,7 @@ async def create_product(
 async def update_product(
     product_uuid: UUID,
     product_data: ProductUpdate,
-    current_user: dict = Depends(require_admin),  # ← Changed!
+    current_user: dict = Depends(require_admin),
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
@@ -130,7 +130,7 @@ async def update_product(
 @router.delete("/{product_uuid}/use-postman-or-similar-to-send-csrf", status_code=status.HTTP_200_OK)
 async def delete_product(
     product_uuid: UUID,
-    current_user: dict = Depends(require_admin),  # ← Changed!
+    current_user: dict = Depends(require_admin),
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):

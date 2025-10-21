@@ -1,4 +1,3 @@
-# app/cache/redis_client.py
 import redis.asyncio as redis
 from typing import Optional
 from app.config import settings
@@ -17,7 +16,6 @@ class RedisClient:
     async def connect(self):
         """Initialize Redis connection"""
         try:
-            # Prepare connection kwargs
             connection_kwargs = {
                 "encoding": "utf-8",
                 "decode_responses": True,
@@ -25,7 +23,6 @@ class RedisClient:
                 "socket_connect_timeout": settings.redis_timeout,
             }
             
-            # Add SSL context if enabled
             if settings.redis_ssl:
                 ssl_context = ssl_module.create_default_context()
                 ssl_context.check_hostname = False

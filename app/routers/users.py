@@ -1,4 +1,3 @@
-# app/routers/users.py
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Query
 from fastapi.responses import HTMLResponse
 from typing import List
@@ -61,14 +60,14 @@ async def verify_email(token: str, db: asyncpg.Connection = Depends(get_db)):
     """Verify user email with token from email link - returns HTML page"""
     try:
         user = await DB.verify_email(conn=db, token=token)
-        return verification_success_page(user['email'])  # ← Clean!
+        return verification_success_page(user['email']) 
         
     except ValueError as e:
-        return verification_error_page(str(e))  # ← Clean!
+        return verification_error_page(str(e)) 
         
     except Exception as e:
         logger.error("email_verification_error", error=str(e))
-        return verification_server_error_page()  # ← Clean!
+        return verification_server_error_page() 
 
 
 @router.post("/resend-verification")

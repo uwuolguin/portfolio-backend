@@ -1,4 +1,3 @@
-# app/middleware/logging.py
 from fastapi import Request
 import time
 import structlog
@@ -11,12 +10,10 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     """Log all requests with timing and status"""
     
     async def dispatch(self, request: Request, call_next):
-        # Generate correlation ID for request tracing
         correlation_id = request.headers.get("X-Correlation-ID", f"req_{int(time.time() * 1000)}")
         
         start_time = time.time()
         
-        # Log request
         logger.info(
             "request_started",
             correlation_id=correlation_id,
@@ -26,13 +23,10 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             user_agent=request.headers.get("user-agent", "unknown")
         )
         
-        # Process request
         response = await call_next(request)
         
-        # Calculate duration
         duration = time.time() - start_time
         
-        # Log response
         log_level = "info" if response.status_code < 400 else "warning" if response.status_code < 500 else "error"
         getattr(logger, log_level)(
             "request_completed",
@@ -43,7 +37,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             duration_ms=f"{duration * 1000:.2f}"
         )
         
-        # Add correlation ID to response headers
         response.headers["X-Correlation-ID"] = correlation_id
         
         return response

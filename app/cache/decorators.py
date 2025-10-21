@@ -1,4 +1,3 @@
-# app/cache/decorators.py
 import json
 import functools
 from typing import Callable, Any
@@ -21,20 +20,16 @@ def cache_response(key_prefix: str, ttl: int = None):
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(*args, **kwargs) -> Any:
-            # Build cache key from function args
             cache_key = f"{key_prefix}:{json.dumps(kwargs, sort_keys=True)}"
             
-            # Try to get from cache
             cached = await redis_client.get(cache_key)
             if cached:
                 logger.debug("cache_hit", key=cache_key)
                 return json.loads(cached)
             
-            # Execute function
             logger.debug("cache_miss", key=cache_key)
             result = await func(*args, **kwargs)
             
-            # Store in cache
             expire_time = ttl or settings.cache_ttl
             await redis_client.set(cache_key, json.dumps(result), expire=expire_time)
             
