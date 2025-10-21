@@ -1,10 +1,11 @@
+# app/routers/communes.py
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import List
 from uuid import UUID
 import asyncpg
 from app.database.connection import get_db
 from app.database.transactions import DB
-from app.auth.dependencies import get_current_user, verify_csrf
+from app.auth.dependencies import get_current_user, verify_csrf, require_admin  # ← Add require_admin
 from app.schemas.communes import CommuneCreate, CommuneUpdate, CommuneResponse
 import structlog
 
@@ -27,12 +28,16 @@ async def list_communes(
     offset: int = Query(0, ge=0),
     db: asyncpg.Connection = Depends(get_db)
 ):
+    """Public endpoint - no auth required"""
     try:
         communes = await DB.get_all_communes(conn=db, limit=limit, offset=offset)
         return [CommuneResponse(**commune) for commune in communes]
     except Exception as e:
         logger.error("list_communes_error", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve communes")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="Failed to retrieve communes"
+        )
 
 
 @router.post(
@@ -43,7 +48,7 @@ async def list_communes(
 )
 async def create_commune(
     commune_data: CommuneCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),  # ← Changed!
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
@@ -54,13 +59,17 @@ async def create_commune(
             user_email=current_user["email"]
         )
         return CommuneResponse(**commune)
+        
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except Exception as e:
         logger.error("create_commune_error", error=str(e), exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create commune")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="Failed to create commune"
+        )
 
 
 @router.put(
@@ -71,7 +80,7 @@ async def create_commune(
 async def update_commune(
     commune_uuid: UUID,
     commune_data: CommuneUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),  # ← Changed!
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
@@ -83,13 +92,17 @@ async def update_commune(
             user_email=current_user["email"]
         )
         return CommuneResponse(**commune)
+        
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
         logger.error("update_commune_error", error=str(e), exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update commune")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="Failed to update commune"
+        )
 
 
 @router.delete(
@@ -99,7 +112,7 @@ async def update_commune(
 )
 async def delete_commune(
     commune_uuid: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),  # ← Changed!
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
@@ -109,21 +122,27 @@ async def delete_commune(
             commune_uuid=commune_uuid,
             user_email=current_user["email"]
         )
+        
         logger.info(
             "commune_deleted_successfully",
             commune_uuid=str(commune_uuid),
             commune_name=result["name"],
             admin_email=current_user["email"]
         )
+        
         return {
             "message": "Commune successfully deleted",
             "uuid": result["uuid"],
             "name": result["name"]
         }
+        
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error("commune_delete_unexpected_error", error=str(e), exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete commune")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="Failed to delete commune"
+        )

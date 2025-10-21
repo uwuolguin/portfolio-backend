@@ -6,6 +6,7 @@ from app.database.connection import get_db
 from app.database.transactions import DB
 from app.auth.dependencies import get_current_user, verify_csrf
 from app.schemas.companies import CompanyResponse, CompanySearchResponse
+from app.auth.dependencies import get_current_user, verify_csrf, require_admin, require_verified_email
 from app.utils.translator import translate_field
 from app.utils.file_handler import FileHandler
 import structlog
@@ -51,11 +52,11 @@ async def create_company(
     description_es: Optional[str] = Form(None, max_length=100),
     description_en: Optional[str] = Form(None, max_length=100),
     address: str = Form(..., min_length=5, max_length=100),
-    phone: str = Form(...,max_length=100),
+    phone: str = Form(..., max_length=100),
     email: str = Form(..., max_length=100),
     lang: str = Form(..., pattern="^(es|en)$"),
     image: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_verified_email),
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
@@ -100,7 +101,7 @@ async def update_company(
     email: Optional[str] = Form(None, max_length=100),
     lang: Optional[str] = Form(None, pattern="^(es|en)$"),
     image: Optional[UploadFile] = File(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_verified_email), 
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
@@ -160,7 +161,7 @@ async def update_company(
 @router.delete("/{company_uuid}", status_code=status.HTTP_200_OK)
 async def delete_company(
     company_uuid: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_verified_email),
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
@@ -221,13 +222,10 @@ async def admin_list_all_companies(
     request: Request,
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin), 
     db: asyncpg.Connection = Depends(get_db)
 ):
     try:
-        if not DB.is_admin(current_user["email"]):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can view all companies")
-        
         companies = await DB.get_all_companies(conn=db, limit=limit, offset=offset)
         
         base_url = str(request.base_url).rstrip('/')
@@ -238,17 +236,20 @@ async def admin_list_all_companies(
             response_companies.append(CompanyResponse(**company_data))
         
         return response_companies
+        
     except HTTPException:
         raise
     except Exception as e:
         logger.error("admin_list_companies_error", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve companies")
-
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="Failed to retrieve companies"
+        )
 
 @router.delete("/admin/{company_uuid}/use-postman-or-similar-to-send-csrf", status_code=status.HTTP_200_OK)
 async def admin_delete_company(
     company_uuid: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin), 
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):

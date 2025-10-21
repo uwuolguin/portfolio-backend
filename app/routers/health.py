@@ -1,0 +1,1 @@
+#here you have to create endpoints onlly for admin to checkout logs, db health and fastapi health as an app.
