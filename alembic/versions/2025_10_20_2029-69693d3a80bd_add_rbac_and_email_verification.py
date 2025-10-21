@@ -21,7 +21,6 @@ def upgrade() -> None:
         sa.Column('role', sa.String(20), nullable=False, server_default='user'),
         schema='proveo'
     )
-    
     op.add_column('users',
         sa.Column('email_verified', sa.Boolean(), nullable=False, server_default='false'),
         schema='proveo'
@@ -34,15 +33,7 @@ def upgrade() -> None:
         sa.Column('verification_token_expires', sa.DateTime(timezone=True), nullable=True),
         schema='proveo'
     )
-    
     op.create_index('idx_users_verification_token', 'users', ['verification_token'], schema='proveo')
-    
-    op.execute("""
-        UPDATE proveo.users 
-        SET role = 'admin', email_verified = true
-        WHERE email = 'acos2014600836@gmail.com'
-    """)
-    
     op.add_column('users_deleted',
         sa.Column('role', sa.String(20), nullable=False, server_default='user'),
         schema='proveo'
