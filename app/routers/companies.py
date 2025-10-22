@@ -254,9 +254,6 @@ async def admin_delete_company(
     _: None = Depends(verify_csrf)
 ):
     try:
-        if not DB.is_admin(current_user["email"]):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can delete companies")
-
         result = await DB.admin_delete_company_by_uuid(
             conn=db,
             company_uuid=company_uuid,
