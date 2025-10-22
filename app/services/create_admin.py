@@ -55,8 +55,9 @@ async def create_admin_user():
                 
                 await conn.execute("""
                     INSERT INTO proveo.users 
-                    (uuid, name, email, hashed_password, role, email_verified)
-                    VALUES ($1, $2, $3, $4, 'admin', true)
+                    (uuid, name, email, hashed_password, role, email_verified,verification_token,
+                    verification_token_expires)
+                    VALUES ($1, $2, $3, $4, 'admin', true,NULL,NULL)
                 """, user_uuid, admin_name, admin_email, hashed_password)
                 
                 print(f"✅ Created new admin user: {admin_email}")
