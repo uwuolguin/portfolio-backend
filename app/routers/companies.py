@@ -62,30 +62,83 @@ async def create_company(
 ):
     try:
         user_uuid = UUID(current_user["sub"])
+        
+        # Validate descriptions
         if not description_es and not description_en:
-            raise HTTPException(status_code=400, detail="At least one description must be provided")
-        if lang == "es":
-            description_es, description_en = await translate_field("company_description", description_es, None)
-        else:
-            description_es, description_en = await translate_field("company_description", None, description_en)
-        image_path = await FileHandler.save_image(image)
-        try:
-            company = await DB.create_company(
-                conn=db, user_uuid=user_uuid, product_uuid=product_uuid, commune_uuid=commune_uuid,
-                name=name, description_es=description_es, description_en=description_en,
-                address=address, phone=phone, email=email, image_url=image_path
+            raise HTTPException(
+                status_code=400,
+                detail="At least one description must be provided"
             )
+        
+        # Translate description
+        if lang == "es":
+            description_es, description_en = await translate_field(
+                "company_description",
+                description_es,
+                None
+            )
+        else:
+            description_es, description_en = await translate_field(
+                "company_description",
+                None,
+                description_en
+            )
+        
+        # Get base URL for NSFW check
+        base_url = str(request.base_url).rstrip('/')
+        
+        # Save and process image with NSFW check
+        # This is async and non-blocking!
+        image_path = await FileHandler.save_image(
+            file=image,
+            check_nsfw=settings.enable_content_moderation,  # Enable NSFW check
+            public_base_url=base_url
+        )
+        
+        try:
+            # Create company in database
+            company = await DB.create_company(
+                conn=db,
+                user_uuid=user_uuid,
+                product_uuid=product_uuid,
+                commune_uuid=commune_uuid,
+                name=name,
+                description_es=description_es,
+                description_en=description_en,
+                address=address,
+                phone=phone,
+                email=email,
+                image_url=image_path
+            )
+            
+            # Prepare response with public URL
             response_data = dict(company)
-            response_data["image_url"] = FileHandler.get_image_url(image_path, str(request.base_url).rstrip('/'))
+            response_data["image_url"] = FileHandler.get_image_url(
+                image_path,
+                base_url
+            )
+            
+            logger.info(
+                "company_created_with_verified_image",
+                company_uuid=str(company["uuid"]),
+                user_uuid=str(user_uuid)
+            )
+            
             return CompanyResponse(**response_data)
+            
         except Exception as db_error:
+            # Rollback: delete saved image on DB error
             FileHandler.delete_image(image_path)
             raise db_error
+            
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to create company")
-
+        logger.error("create_company_error", error=str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create company"
+        )
 
 @router.put("/{company_uuid}", response_model=CompanyResponse)
 async def update_company(
@@ -101,32 +154,53 @@ async def update_company(
     email: Optional[str] = Form(None, max_length=100),
     lang: Optional[str] = Form(None, pattern="^(es|en)$"),
     image: Optional[UploadFile] = File(None),
-    current_user: dict = Depends(require_verified_email), 
+    current_user: dict = Depends(require_verified_email),
     db: asyncpg.Connection = Depends(get_db),
     _: None = Depends(verify_csrf)
 ):
     try:
         user_uuid = UUID(current_user["sub"])
+        
+        # Translate descriptions if provided
         final_description_es = description_es
         final_description_en = description_en
+        
         if (description_es or description_en) and lang:
             if lang == "es":
                 final_description_es, final_description_en = await translate_field(
-                    "company_description", description_es, None
+                    "company_description",
+                    description_es,
+                    None
                 )
             else:
                 final_description_es, final_description_en = await translate_field(
-                    "company_description", None, description_en
+                    "company_description",
+                    None,
+                    description_en
                 )
-
+        
+        # Handle image update with NSFW check
         new_image_path = None
         old_image_path = None
+        
         if image:
+            # Get old image path for cleanup
             old_company = await DB.get_company_by_uuid(conn=db, company_uuid=company_uuid)
             if old_company:
                 old_image_path = old_company.get("image_url")
-            new_image_path = await FileHandler.save_image(image, str(company_uuid))
-
+            
+            # Get base URL for NSFW check
+            base_url = str(request.base_url).rstrip('/')
+            
+            # Save and process new image with NSFW check (async, non-blocking)
+            new_image_path = await FileHandler.save_image(
+                file=image,
+                company_uuid=str(company_uuid),
+                check_nsfw=settings.enable_content_moderation,  # Enable NSFW check
+                public_base_url=base_url
+            )
+        
+        # Update company in database
         company = await DB.update_company_by_uuid(
             conn=db,
             company_uuid=company_uuid,
@@ -141,22 +215,36 @@ async def update_company(
             product_uuid=product_uuid,
             commune_uuid=commune_uuid
         )
-
+        
+        # Clean up old image after successful update
         if new_image_path and old_image_path and old_image_path != new_image_path:
             FileHandler.delete_image(old_image_path)
-
+        
+        # Prepare response
         response_data = dict(company)
         response_data["image_url"] = FileHandler.get_image_url(
-            company["image_url"], str(request.base_url).rstrip('/')
+            company["image_url"],
+            str(request.base_url).rstrip('/')
         )
-
+        
+        logger.info(
+            "company_updated_with_verified_image",
+            company_uuid=str(company_uuid),
+            user_uuid=str(user_uuid),
+            new_image=bool(new_image_path)
+        )
+        
         return CompanyResponse(**response_data)
-
+        
     except HTTPException:
         raise
     except Exception as e:
         logger.error("update_company_error", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to update company")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update company"
+        )
+
 
 @router.delete("/{company_uuid}", status_code=status.HTTP_200_OK)
 async def delete_company(

@@ -2,9 +2,10 @@ import uuid
 import asyncio
 import structlog
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 from fastapi import UploadFile, HTTPException, status
 from app.config import settings
+from app.services.image_processor import image_processor
 
 logger = structlog.get_logger(__name__)
 
@@ -18,45 +19,72 @@ class FileHandler:
         logger.info("upload_directory_initialized", path=str(FileHandler.UPLOAD_DIR))
 
     @staticmethod
-    async def validate_image(file: UploadFile) -> None:
-        if not file:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No file provided"
-            )
-
-        if file.content_type not in settings.allowed_file_types:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid file type. Allowed types: {', '.join(settings.allowed_file_types)}"
-            )
-        extension = Path(file.filename).suffix.lower()
-        allowed_extensions = {".jpeg", ".png"}
-        if extension not in allowed_extensions:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid file extension. Allowed: {', '.join(allowed_extensions)}"
-            )
-
-        logger.debug("file_validated", filename=file.filename, content_type=file.content_type)
-
-    @staticmethod
-    async def save_image(file: UploadFile, company_uuid: Optional[str] = None) -> str:
-        await FileHandler.validate_image(file)
-
-        file_extension = Path(file.filename).suffix.lower()
-        filename = f"{company_uuid or uuid.uuid4()}{file_extension}"
-        file_path = FileHandler.UPLOAD_DIR / filename
-
+    async def save_image(
+        file: UploadFile,
+        company_uuid: Optional[str] = None,
+        check_nsfw: bool = False,
+        public_base_url: Optional[str] = None
+    ) -> str:
+        """
+        Save and process uploaded image with security checks
+        
+        Args:
+            file: Uploaded file
+            company_uuid: Optional UUID for filename
+            check_nsfw: Whether to perform NSFW detection
+            public_base_url: Base URL for constructing public image URL
+            
+        Returns:
+            str: Path to saved image
+            
+        Raises:
+            HTTPException: If validation fails or NSFW content detected
+        """
         try:
-            content = await file.read()
-
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, file_path.write_bytes, content)
-
-            logger.info("file_saved", filename=filename, size=len(content))
-            return str(file_path.resolve())
-
+            # Process and save image (async, non-blocking)
+            result = await image_processor.process_and_save(
+                file=file,
+                upload_dir=FileHandler.UPLOAD_DIR,
+                company_uuid=company_uuid,
+                check_nsfw=check_nsfw,
+                public_base_url=public_base_url
+            )
+            
+            # Check if NSFW content was flagged
+            if result.get("nsfw_flagged"):
+                # Delete the saved file
+                saved_path = Path(result["path"])
+                if saved_path.exists():
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        saved_path.unlink
+                    )
+                
+                nsfw_data = result.get("nsfw_check", {})
+                rating = nsfw_data.get("rating_index", "unknown")
+                
+                logger.warning(
+                    "nsfw_image_rejected",
+                    filename=result["filename"],
+                    rating=rating
+                )
+                
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Image contains inappropriate content and cannot be uploaded"
+                )
+            
+            logger.info(
+                "image_saved_successfully",
+                filename=result["filename"],
+                size=result["size"]
+            )
+            
+            return result["path"]
+            
+        except HTTPException:
+            # Re-raise HTTP exceptions (validation errors, NSFW flagged)
+            raise
         except Exception as e:
             logger.error("file_save_error", error=str(e), exc_info=True)
             raise HTTPException(
@@ -66,6 +94,7 @@ class FileHandler:
 
     @staticmethod
     def delete_image(image_path: str) -> bool:
+        """Delete image file synchronously"""
         try:
             file_path = Path(image_path)
             if file_path.exists():
@@ -81,4 +110,5 @@ class FileHandler:
 
     @staticmethod
     def get_image_url(image_path: str, request_base_url: str) -> str:
+        """Generate public URL for image"""
         return f"{request_base_url.rstrip('/')}/{str(image_path).lstrip('/')}"
