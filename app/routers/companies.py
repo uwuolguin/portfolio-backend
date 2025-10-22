@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from typing import List, Optional
 from uuid import UUID
 import asyncpg
+from app.config import settings
 from app.database.connection import get_db
 from app.database.transactions import DB
 from app.auth.dependencies import get_current_user, verify_csrf
@@ -10,6 +11,7 @@ from app.auth.dependencies import get_current_user, verify_csrf, require_admin, 
 from app.utils.translator import translate_field
 from app.utils.file_handler import FileHandler
 import structlog
+
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/companies", tags=["companies"])
