@@ -33,14 +33,12 @@ async def create_admin_user():
         conn = await asyncpg.connect(settings.database_url)
         
         try:
-            # Check if user already exists
             existing = await conn.fetchval(
                 "SELECT uuid FROM proveo.users WHERE email = $1",
                 admin_email
             )
             
             if existing:
-                # Update existing user to admin
                 await conn.execute("""
                     UPDATE proveo.users 
                     SET role = 'admin', email_verified = true, hashed_password = $1
@@ -49,7 +47,6 @@ async def create_admin_user():
                 
                 print(f"✅ Updated existing user to admin: {admin_email}")
             else:
-                # Create new admin user
                 user_uuid = str(uuid.uuid4())
                 hashed_password = get_password_hash(admin_password)
                 
