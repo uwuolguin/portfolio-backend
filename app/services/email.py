@@ -11,7 +11,7 @@ class EmailService:
     
     async def send_verification_email(self, to_email: str, token: str, user_name: str) -> bool:
         """Send email verification link"""
-        verification_url = f"{settings.frontend_url}/verify-email?token={token}"
+        verification_url = f"{settings.api_base_url}/api/v1/users/verify-email/{token}"
         
         html_content = f"""
         <!DOCTYPE html>
