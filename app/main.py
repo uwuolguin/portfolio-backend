@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+
 from app.config import settings
 from app.database.connection import init_db_pools, close_db_pools
 from app.cache.redis_client import redis_client
@@ -14,14 +15,17 @@ from app.routers import users, products, communes, companies
 
 Path("uploads/company_images").mkdir(parents=True, exist_ok=True)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     FileHandler.init_upload_directory()
+    FileHandler.load_nsfw_model()
     await init_db_pools()
     await redis_client.connect()
     yield
     await close_db_pools()
     await redis_client.disconnect()
+
 
 app = FastAPI(
     title=settings.project_name,
