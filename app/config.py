@@ -38,13 +38,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------------
     # File uploads / Image processing
     # ------------------------------------------------------------------------
-    enable_content_moderation: bool = True
     max_file_size: int = 10_000_000  # 10 MB
     allowed_file_types: List[str] = ["image/jpeg", "image/png"]
-
-    # 🔥 DeepAI only — no fallbacks allowed
-    nsfw_provider: str = "deepai"
-    deepai_api_key: str  # required, no Optional
 
     # ------------------------------------------------------------------------
     # API

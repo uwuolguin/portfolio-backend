@@ -86,15 +86,10 @@ async def create_company(
                 description_en
             )
         
-        # Get base URL for NSFW check
-        base_url = str(request.base_url).rstrip('/')
-        
-        # Save and process image with NSFW check
-        # This is async and non-blocking!
+        # Save image (REMOVED: check_nsfw and public_base_url parameters)
         image_path = await FileHandler.save_image(
             file=image,
-            check_nsfw=settings.enable_content_moderation,  # Enable NSFW check
-            public_base_url=base_url
+            company_uuid=str(user_uuid)
         )
         
         try:
@@ -117,11 +112,11 @@ async def create_company(
             response_data = dict(company)
             response_data["image_url"] = FileHandler.get_image_url(
                 image_path,
-                base_url
+                str(request.base_url).rstrip('/')
             )
             
             logger.info(
-                "company_created_with_verified_image",
+                "company_created",  # REMOVED: _with_verified_image suffix
                 company_uuid=str(company["uuid"]),
                 user_uuid=str(user_uuid)
             )
@@ -181,7 +176,7 @@ async def update_company(
                     description_en
                 )
         
-        # Handle image update with NSFW check
+        # Handle image update (REMOVED: NSFW check)
         new_image_path = None
         old_image_path = None
         
@@ -191,15 +186,10 @@ async def update_company(
             if old_company:
                 old_image_path = old_company.get("image_url")
             
-            # Get base URL for NSFW check
-            base_url = str(request.base_url).rstrip('/')
-            
-            # Save and process new image with NSFW check (async, non-blocking)
+            # Save new image (REMOVED: check_nsfw and public_base_url parameters)
             new_image_path = await FileHandler.save_image(
                 file=image,
-                company_uuid=str(company_uuid),
-                check_nsfw=settings.enable_content_moderation,  # Enable NSFW check
-                public_base_url=base_url
+                company_uuid=str(company_uuid)
             )
         
         # Update company in database
@@ -230,7 +220,7 @@ async def update_company(
         )
         
         logger.info(
-            "company_updated_with_verified_image",
+            "company_updated",  # REMOVED: _with_verified_image suffix
             company_uuid=str(company_uuid),
             user_uuid=str(user_uuid),
             new_image=bool(new_image_path)
