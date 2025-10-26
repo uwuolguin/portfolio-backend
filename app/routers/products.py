@@ -8,6 +8,7 @@ from app.utils.translator import translate_field
 from app.auth.dependencies import verify_csrf, require_admin 
 from app.schemas.products import ProductCreate, ProductUpdate, ProductResponse
 from app.cache.decorators import cache_response
+from app.cache.cache_manager import cache_manager
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -15,11 +16,11 @@ router = APIRouter(prefix="/products", tags=["products"])
 
 
 @router.get("/", response_model=List[ProductResponse])
-@cache_response(key_prefix="products:all", ttl=3600)  # Cache for 1 hour
+@cache_response(key_prefix="products:all", ttl=259200)  # Cache for 3 days
 async def list_products(
     db: asyncpg.Connection = Depends(get_db)
 ):
-    """Public endpoint - cached for 1 hour"""
+    """Public endpoint - cached for 3 days"""
     products = await DB.get_all_products(conn=db)
     return [ProductResponse(**product) for product in products]
 
@@ -50,6 +51,9 @@ async def create_product(
             name_en=name_en, 
             user_email=current_user["email"]
         )
+        
+        # Invalidate cache so next request gets fresh data
+        await cache_manager.invalidate_products()
         
         logger.info("product_created", 
                    product_uuid=str(product["uuid"]), 
@@ -102,6 +106,9 @@ async def update_product(
             user_email=current_user["email"]
         )
         
+        # Invalidate cache so next request gets fresh data
+        await cache_manager.invalidate_products()
+        
         logger.info("product_updated", 
                    product_uuid=str(product_uuid), 
                    admin_email=current_user["email"])
@@ -133,6 +140,9 @@ async def delete_product(
             product_uuid=product_uuid, 
             user_email=current_user["email"]
         )
+        
+        # Invalidate cache so next request gets fresh data
+        await cache_manager.invalidate_products()
         
         logger.info("product_deleted_successfully", 
                    product_uuid=str(product_uuid), 

@@ -7,6 +7,7 @@ from app.database.transactions import DB
 from app.auth.dependencies import  verify_csrf, require_admin
 from app.schemas.communes import CommuneCreate, CommuneUpdate, CommuneResponse
 from app.cache.decorators import cache_response
+from app.cache.cache_manager import cache_manager
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -18,11 +19,11 @@ router = APIRouter(
 
 
 @router.get("/", response_model=List[CommuneResponse])
-@cache_response(key_prefix="communes:all", ttl=3600)  # Cache for 1 hour
+@cache_response(key_prefix="communes:all", ttl=259200)  # Cache for 3 days
 async def list_communes(
     db: asyncpg.Connection = Depends(get_db)
 ):
-    """Public endpoint - cached for 1 hour"""
+    """Public endpoint - cached for 3 days"""
     communes = await DB.get_all_communes(conn=db)
     return [CommuneResponse(**commune) for commune in communes]
 
@@ -45,6 +46,10 @@ async def create_commune(
             name=commune_data.name,
             user_email=current_user["email"]
         )
+        
+        # Invalidate cache so next request gets fresh data
+        await cache_manager.invalidate_communes()
+        
         return CommuneResponse(**commune)
         
     except PermissionError as e:
@@ -78,6 +83,10 @@ async def update_commune(
             name=commune_data.name,
             user_email=current_user["email"]
         )
+        
+        # Invalidate cache so next request gets fresh data
+        await cache_manager.invalidate_communes()
+        
         return CommuneResponse(**commune)
         
     except PermissionError as e:
@@ -109,6 +118,9 @@ async def delete_commune(
             commune_uuid=commune_uuid,
             user_email=current_user["email"]
         )
+        
+        # Invalidate cache so next request gets fresh data
+        await cache_manager.invalidate_communes()
         
         logger.info(
             "commune_deleted_successfully",
