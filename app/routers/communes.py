@@ -6,6 +6,7 @@ from app.database.connection import get_db
 from app.database.transactions import DB
 from app.auth.dependencies import  verify_csrf, require_admin
 from app.schemas.communes import CommuneCreate, CommuneUpdate, CommuneResponse
+from app.cache.decorators import cache_response
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -16,25 +17,14 @@ router = APIRouter(
 )
 
 
-@router.get(
-    "/",
-    response_model=List[CommuneResponse],
-    summary="List all communes (Public)",
-    description="Retrieve all communes - no authentication required"
-)
+@router.get("/", response_model=List[CommuneResponse])
+@cache_response(key_prefix="communes:all", ttl=3600)  # Cache for 1 hour
 async def list_communes(
     db: asyncpg.Connection = Depends(get_db)
 ):
-    """Public endpoint - no auth required"""
-    try:
-        communes = await DB.get_all_communes(conn=db)
-        return [CommuneResponse(**commune) for commune in communes]
-    except Exception as e:
-        logger.error("list_communes_error", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail="Failed to retrieve communes"
-        )
+    """Public endpoint - cached for 1 hour"""
+    communes = await DB.get_all_communes(conn=db)
+    return [CommuneResponse(**commune) for commune in communes]
 
 
 @router.post(

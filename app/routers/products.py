@@ -7,6 +7,7 @@ from app.database.transactions import DB
 from app.utils.translator import translate_field
 from app.auth.dependencies import verify_csrf, require_admin 
 from app.schemas.products import ProductCreate, ProductUpdate, ProductResponse
+from app.cache.decorators import cache_response
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -14,19 +15,13 @@ router = APIRouter(prefix="/products", tags=["products"])
 
 
 @router.get("/", response_model=List[ProductResponse])
+@cache_response(key_prefix="products:all", ttl=3600)  # Cache for 1 hour
 async def list_products(
     db: asyncpg.Connection = Depends(get_db)
 ):
-    """Public endpoint - no auth required"""
-    try:
-        products = await DB.get_all_products(conn=db)
-        return [ProductResponse(**product) for product in products]
-    except Exception as e:
-        logger.error("list_products_error", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail="Failed to retrieve products"
-        )
+    """Public endpoint - cached for 1 hour"""
+    products = await DB.get_all_products(conn=db)
+    return [ProductResponse(**product) for product in products]
 
 
 @router.post("/use-postman-or-similar-to-send-csrf", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
