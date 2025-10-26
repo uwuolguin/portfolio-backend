@@ -15,13 +15,11 @@ router = APIRouter(prefix="/products", tags=["products"])
 
 @router.get("/", response_model=List[ProductResponse])
 async def list_products(
-    limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
     db: asyncpg.Connection = Depends(get_db)
 ):
     """Public endpoint - no auth required"""
     try:
-        products = await DB.get_all_products(conn=db, limit=limit, offset=offset)
+        products = await DB.get_all_products(conn=db)
         return [ProductResponse(**product) for product in products]
     except Exception as e:
         logger.error("list_products_error", error=str(e))

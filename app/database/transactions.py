@@ -295,9 +295,9 @@ class DB:
         
     @staticmethod
     @db_retry()
-    async def get_all_products(conn: asyncpg.Connection, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
-        query = "SELECT uuid, name_es, name_en, created_at FROM proveo.products ORDER BY name_en ASC LIMIT $1 OFFSET $2"
-        rows = await conn.fetch(query, limit, offset)
+    async def get_all_products(conn: asyncpg.Connection) -> List[Dict[str, Any]]:
+        query = "SELECT uuid, name_es, name_en, created_at FROM proveo.products ORDER BY name_en ASC"
+        rows = await conn.fetch(query)
         return [dict(row) for row in rows]
 
     @staticmethod
@@ -378,9 +378,9 @@ class DB:
 
     @staticmethod
     @db_retry()
-    async def get_all_communes(conn: asyncpg.Connection, limit: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
-        query = "SELECT uuid,name,created_at FROM proveo.communes ORDER BY name ASC LIMIT $1 OFFSET $2"
-        rows = await conn.fetch(query, limit, offset)
+    async def get_all_communes(conn: asyncpg.Connection) -> List[Dict[str, Any]]:
+        query = "SELECT uuid,name,created_at FROM proveo.communes ORDER BY name ASC"
+        rows = await conn.fetch(query)
         return [dict(row) for row in rows]
 
     @staticmethod

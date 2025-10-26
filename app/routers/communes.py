@@ -23,13 +23,11 @@ router = APIRouter(
     description="Retrieve all communes - no authentication required"
 )
 async def list_communes(
-    limit: int = Query(500, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
     db: asyncpg.Connection = Depends(get_db)
 ):
     """Public endpoint - no auth required"""
     try:
-        communes = await DB.get_all_communes(conn=db, limit=limit, offset=offset)
+        communes = await DB.get_all_communes(conn=db)
         return [CommuneResponse(**commune) for commune in communes]
     except Exception as e:
         logger.error("list_communes_error", error=str(e))

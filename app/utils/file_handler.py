@@ -63,6 +63,7 @@ class FileHandler:
         try:
             with Image.open(BytesIO(file_bytes)) as img:
                 img.load()
+                fmt = (img.format or "").upper() 
                 img_copy = img.copy()
         except UnidentifiedImageError:
             raise HTTPException(
@@ -70,7 +71,6 @@ class FileHandler:
                 detail="Invalid or corrupted image file"
             )
 
-        fmt = (img_copy.format or "").upper()
         if fmt not in FileHandler.ALLOWED_FORMATS:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -133,7 +133,7 @@ class FileHandler:
             )
 
             nsfw_score = await run_in_threadpool(FileHandler._check_nsfw_sync, file_bytes)
-            if nsfw_score > 0.8:
+            if nsfw_score > 0.98:
                 logger.warning("nsfw_image_rejected", nsfw_score=nsfw_score)
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
