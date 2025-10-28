@@ -16,7 +16,7 @@ async def validate_csrf_token(request: Request) -> None:
     """
     if request.method in ["GET", "HEAD", "OPTIONS"]:
         return
-    return
+
     cookie_token = request.cookies.get("csrf_token")
     
     header_token = request.headers.get("X-CSRF-Token")
