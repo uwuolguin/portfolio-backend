@@ -35,26 +35,26 @@ class FileHandler:
     _nsfw_model = None
     _nsfw_available = False
     
-    NSFW_THRESHOLD = 0.95  
+    NSFW_THRESHOLD = 0.75  
 
     @staticmethod
     def load_nsfw_model() -> None:
         """
         Initialize NSFW model once at startup.
         Forces weight download if needed.
+        
+        NOTE: opennsfw2 v0.14+ handles model internally, no need to pass it
         """
-        if FileHandler._nsfw_model is not None:
+        if FileHandler._nsfw_available:
             logger.info("nsfw_model_already_loaded")
             return
 
         try:
             logger.info("nsfw_model_loading_starting")
             
-            from opennsfw2 import make_open_nsfw_model
+            from opennsfw2 import predict_image
             
             logger.info("nsfw_model_building", message="This may download weights (~40MB) on first run")
-            
-            FileHandler._nsfw_model = make_open_nsfw_model()
             
             logger.info("nsfw_model_testing")
             test_img = Image.new('RGB', (224, 224), color='red')
@@ -62,8 +62,7 @@ class FileHandler:
             test_img.save(test_bytes, format='JPEG')
             test_bytes.seek(0)
             
-            from opennsfw2 import predict_image
-            test_score = predict_image(test_bytes, model=FileHandler._nsfw_model)
+            test_score = predict_image(test_bytes)
             
             logger.info(
                 "nsfw_model_loaded_successfully",
@@ -71,6 +70,7 @@ class FileHandler:
                 message=f"Model operational (test score: {test_score:.4f})"
             )
             
+            FileHandler._nsfw_model = True
             FileHandler._nsfw_available = True
             
         except ImportError as e:
@@ -178,7 +178,7 @@ class FileHandler:
         IMPORTANT: If model unavailable, returns (1.0, False) to REJECT by default
         This is safer - requires manual review if NSFW check can't run
         """
-        if not FileHandler._nsfw_available or FileHandler._nsfw_model is None:
+        if not FileHandler._nsfw_available:
             logger.warning(
                 "nsfw_check_unavailable_blocking_upload",
                 message="NSFW model not loaded - blocking upload for safety"
@@ -189,7 +189,7 @@ class FileHandler:
             from opennsfw2 import predict_image
             
             img_stream = BytesIO(image_bytes)
-            score = predict_image(img_stream, model=FileHandler._nsfw_model)
+            score = predict_image(img_stream)
             
             logger.info(
                 "nsfw_check_completed",
@@ -227,6 +227,7 @@ class FileHandler:
                 file_bytes,
                 file.content_type or "image/jpeg"
             )
+
             nsfw_score, check_performed = await run_in_threadpool(
                 FileHandler._check_nsfw_sync, 
                 file_bytes
@@ -325,7 +326,7 @@ class FileHandler:
         """Get current NSFW checking status (useful for admin dashboard)."""
         return {
             "available": FileHandler._nsfw_available,
-            "model_loaded": FileHandler._nsfw_model is not None,
+            "model_loaded": FileHandler._nsfw_available,  
             "status": "active" if FileHandler._nsfw_available else "disabled",
             "threshold": FileHandler.NSFW_THRESHOLD
         }
