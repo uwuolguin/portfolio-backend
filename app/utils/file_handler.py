@@ -7,11 +7,15 @@ from io import BytesIO
 from fastapi import UploadFile, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from PIL import Image, UnidentifiedImageError
-from opennsfw2 import make_open_nsfw_model, predict_image
 
 from app.config import settings
 
 logger = structlog.get_logger(__name__)
+
+
+class NSFWModelError(Exception):
+    """Custom exception for NSFW model issues"""
+    pass
 
 
 class FileHandler:
@@ -29,14 +33,68 @@ class FileHandler:
     EXT_BY_FORMAT = {"JPEG": "jpg", "PNG": "png"}
 
     _nsfw_model = None
+    _nsfw_available = False
+    
+    NSFW_THRESHOLD = 0.95  
 
     @staticmethod
     def load_nsfw_model() -> None:
-        """Initialize NSFW model once at startup."""
-        if FileHandler._nsfw_model is None:
-            logger.info("nsfw_model_loading")
+        """
+        Initialize NSFW model once at startup.
+        Forces weight download if needed.
+        """
+        if FileHandler._nsfw_model is not None:
+            logger.info("nsfw_model_already_loaded")
+            return
+
+        try:
+            logger.info("nsfw_model_loading_starting")
+            
+            from opennsfw2 import make_open_nsfw_model
+            
+            logger.info("nsfw_model_building", message="This may download weights (~40MB) on first run")
+            
             FileHandler._nsfw_model = make_open_nsfw_model()
-            logger.info("nsfw_model_loaded")
+            
+            logger.info("nsfw_model_testing")
+            test_img = Image.new('RGB', (224, 224), color='red')
+            test_bytes = BytesIO()
+            test_img.save(test_bytes, format='JPEG')
+            test_bytes.seek(0)
+            
+            from opennsfw2 import predict_image
+            test_score = predict_image(test_bytes, model=FileHandler._nsfw_model)
+            
+            logger.info(
+                "nsfw_model_loaded_successfully",
+                test_score=float(test_score),
+                message=f"Model operational (test score: {test_score:.4f})"
+            )
+            
+            FileHandler._nsfw_available = True
+            
+        except ImportError as e:
+            logger.error(
+                "nsfw_model_import_failed",
+                error=str(e),
+                message="Install with: pip install opennsfw2"
+            )
+            FileHandler._nsfw_available = False
+            
+        except Exception as e:
+            logger.error(
+                "nsfw_model_load_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True
+            )
+            FileHandler._nsfw_available = False
+            
+            if "urlopen" in str(e) or "URLError" in str(e) or "Connection" in str(e):
+                logger.critical(
+                    "nsfw_model_download_failed",
+                    message="Cannot download model weights. Check internet connection."
+                )
 
     @staticmethod
     def init_upload_directory() -> None:
@@ -45,8 +103,12 @@ class FileHandler:
         logger.info("upload_directory_initialized", path=str(FileHandler.UPLOAD_DIR))
 
     @staticmethod
-    def _validate_and_process_image(file_bytes: bytes, content_type: str) -> tuple[BytesIO, str]:
+    def _validate_and_process_image(
+        file_bytes: bytes, 
+        content_type: str
+    ) -> tuple[BytesIO, str]:
         """Validate and process image synchronously."""
+        
         if content_type not in FileHandler.ALLOWED_MIME:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -106,16 +168,46 @@ class FileHandler:
         )
 
         return out, ext
+
     @staticmethod
-    def _check_nsfw_sync(image_bytes: bytes) -> float:
-        """Run NSFW detection in threadpool. Returns float score 0.0–1.0."""
+    def _check_nsfw_sync(image_bytes: bytes) -> tuple[float, bool]:
+        """
+        Run NSFW detection in threadpool.
+        Returns (score, check_performed)
+        
+        IMPORTANT: If model unavailable, returns (1.0, False) to REJECT by default
+        This is safer - requires manual review if NSFW check can't run
+        """
+        if not FileHandler._nsfw_available or FileHandler._nsfw_model is None:
+            logger.warning(
+                "nsfw_check_unavailable_blocking_upload",
+                message="NSFW model not loaded - blocking upload for safety"
+            )
+            return (1.0, False)
+
         try:
+            from opennsfw2 import predict_image
+            
             img_stream = BytesIO(image_bytes)
             score = predict_image(img_stream, model=FileHandler._nsfw_model)
-            return float(score)
+            
+            logger.info(
+                "nsfw_check_completed",
+                score=float(score),
+                threshold=FileHandler.NSFW_THRESHOLD,
+                will_block=score > FileHandler.NSFW_THRESHOLD
+            )
+            
+            return (float(score), True)
+            
         except Exception as e:
-            logger.error("nsfw_check_failed", error=str(e))
-            return 0.0
+            logger.error(
+                "nsfw_check_execution_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True
+            )
+            return (1.0, False)
 
     @staticmethod
     async def save_image(
@@ -123,6 +215,10 @@ class FileHandler:
         company_uuid: Optional[str] = None,
         **kwargs
     ) -> str:
+        """
+        Save and validate uploaded image with NSFW checking.
+        Returns the file path as string.
+        """
         try:
             file_bytes = await file.read()
 
@@ -131,13 +227,46 @@ class FileHandler:
                 file_bytes,
                 file.content_type or "image/jpeg"
             )
+            nsfw_score, check_performed = await run_in_threadpool(
+                FileHandler._check_nsfw_sync, 
+                file_bytes
+            )
 
-            nsfw_score = await run_in_threadpool(FileHandler._check_nsfw_sync, file_bytes)
-            if nsfw_score > 0.98:
-                logger.warning("nsfw_image_rejected", nsfw_score=nsfw_score)
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Image rejected for inappropriate content"
+            if nsfw_score > FileHandler.NSFW_THRESHOLD:
+                if check_performed:
+                    logger.warning(
+                        "nsfw_image_rejected",
+                        nsfw_score=nsfw_score,
+                        threshold=FileHandler.NSFW_THRESHOLD,
+                        company_uuid=company_uuid,
+                        reason="explicit_content_detected"
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Image rejected: inappropriate content detected (confidence: {nsfw_score:.1%})"
+                    )
+                else:
+                    logger.error(
+                        "nsfw_check_failed_blocking_upload",
+                        company_uuid=company_uuid,
+                        reason="nsfw_model_unavailable"
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Content moderation service unavailable. Please try again later."
+                    )
+            
+            if check_performed:
+                logger.info(
+                    "nsfw_check_passed",
+                    score=nsfw_score,
+                    threshold=FileHandler.NSFW_THRESHOLD
+                )
+            else:
+                logger.warning(
+                    "image_uploaded_without_nsfw_check",
+                    company_uuid=company_uuid,
+                    score=nsfw_score
                 )
 
             filename = f"{company_uuid or uuid.uuid4()}.{ext}"
@@ -154,7 +283,9 @@ class FileHandler:
                 "image_saved_successfully",
                 filename=filename,
                 path=str(save_path),
-                size=save_path.stat().st_size
+                size=save_path.stat().st_size,
+                nsfw_checked=check_performed,
+                nsfw_score=nsfw_score
             )
 
             return str(save_path)
@@ -170,6 +301,7 @@ class FileHandler:
 
     @staticmethod
     def delete_image(image_path: str) -> bool:
+        """Delete an image file. Returns True if successful."""
         try:
             file_path = Path(image_path)
             if file_path.exists():
@@ -184,5 +316,16 @@ class FileHandler:
 
     @staticmethod
     def get_image_url(image_path: str, request_base_url: str) -> str:
+        """Convert file path to public URL."""
         filename = Path(image_path).name
         return f"{request_base_url.rstrip('/')}/uploads/{filename}"
+
+    @staticmethod
+    def get_nsfw_status() -> dict:
+        """Get current NSFW checking status (useful for admin dashboard)."""
+        return {
+            "available": FileHandler._nsfw_available,
+            "model_loaded": FileHandler._nsfw_model is not None,
+            "status": "active" if FileHandler._nsfw_available else "disabled",
+            "threshold": FileHandler.NSFW_THRESHOLD
+        }
