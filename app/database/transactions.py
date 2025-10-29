@@ -10,6 +10,7 @@ from app.config import settings
 import uuid
 from app.auth.csrf import generate_csrf_token
 from datetime import datetime,timedelta,timezone
+from app.utils.file_handler import FileHandler
 
 logger = structlog.get_logger(__name__)
 
@@ -153,6 +154,7 @@ class DB:
     @staticmethod
     @db_retry()
     async def delete_user_by_uuid(conn: asyncpg.Connection, user_uuid: UUID) -> Dict[str, Any]:
+        """User deletes their own account"""
         async with transaction(conn, isolation=IsolationLevel.SERIALIZABLE):
             user_query = """
                 SELECT uuid, name, email, hashed_password, role, email_verified, created_at 
@@ -172,6 +174,25 @@ class DB:
             companies = await conn.fetch(companies_query, user_uuid)
             
             if companies:
+                deleted_images = []
+                for company in companies:
+                    image_path = company.get("image_url")
+                    if image_path:
+                        success = FileHandler.delete_image(image_path)
+                        if success:
+                            deleted_images.append(image_path)
+                            logger.info(
+                                "user_self_delete_image_removed",
+                                company_uuid=str(company["uuid"]),
+                                image_path=image_path
+                            )
+                        else:
+                            logger.warning(
+                                "user_self_delete_image_not_found",
+                                company_uuid=str(company["uuid"]),
+                                image_path=image_path
+                            )
+                
                 delete_companies_query = """
                     INSERT INTO proveo.companies_deleted 
                         (uuid, user_uuid, product_uuid, commune_uuid, name, description_es, 
@@ -186,9 +207,16 @@ class DB:
                         company["email"], company["image_url"], company["created_at"],
                         company["updated_at"]
                     )
+                
                 await conn.execute("DELETE FROM proveo.companies WHERE user_uuid = $1", user_uuid)
                 await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
-                logger.info("user_companies_deleted", user_uuid=str(user_uuid), companies_count=len(companies))
+                
+                logger.info(
+                    "user_companies_deleted", 
+                    user_uuid=str(user_uuid), 
+                    companies_count=len(companies),
+                    images_deleted=len(deleted_images)
+                )
             
             insert_deleted_user = """
                 INSERT INTO proveo.users_deleted 
@@ -202,10 +230,13 @@ class DB:
             
             await conn.execute("DELETE FROM proveo.users WHERE uuid = $1", user_uuid)
             
-            logger.info("user_deleted_with_cascade", 
-                       user_uuid=str(user_uuid), 
-                       email=user["email"], 
-                       companies_deleted=len(companies))
+            logger.info(
+                "user_deleted_with_cascade", 
+                user_uuid=str(user_uuid), 
+                email=user["email"], 
+                companies_deleted=len(companies)
+            )
+            
             return {
                 "user_uuid": str(user_uuid), 
                 "email": user["email"], 
@@ -230,6 +261,8 @@ class DB:
     @staticmethod
     @db_retry()
     async def admin_delete_user_by_uuid(conn: asyncpg.Connection, user_uuid: UUID, admin_email: str) -> Dict[str, Any]:
+        """Admin deletes another user's account"""
+        # Verify admin permissions
         admin_user = await conn.fetchrow(
             "SELECT role FROM proveo.users WHERE email = $1", 
             admin_email
@@ -250,6 +283,27 @@ class DB:
             companies = await conn.fetch(companies_query, user_uuid)
             
             if companies:
+                deleted_images = []
+                for company in companies:
+                    image_path = company.get("image_url")
+                    if image_path:
+                        success = FileHandler.delete_image(image_path)
+                        if success:
+                            deleted_images.append(image_path)
+                            logger.info(
+                                "admin_delete_user_image_removed",
+                                company_uuid=str(company["uuid"]),
+                                image_path=image_path,
+                                admin_email=admin_email
+                            )
+                        else:
+                            logger.warning(
+                                "admin_delete_user_image_not_found",
+                                company_uuid=str(company["uuid"]),
+                                image_path=image_path,
+                                admin_email=admin_email
+                            )
+                
                 delete_companies_query = """
                     INSERT INTO proveo.companies_deleted
                         (uuid, user_uuid, product_uuid, commune_uuid, name, description_es, 
@@ -264,11 +318,16 @@ class DB:
                         company["email"], company["image_url"], company["created_at"],
                         company["updated_at"]
                     )
+                
                 await conn.execute("DELETE FROM proveo.companies WHERE user_uuid=$1", user_uuid)
-                logger.info("admin_deleted_user_companies", 
-                           user_uuid=str(user_uuid), 
-                           companies_count=len(companies), 
-                           admin_email=admin_email)
+                
+                logger.info(
+                    "admin_deleted_user_companies", 
+                    user_uuid=str(user_uuid), 
+                    companies_count=len(companies),
+                    images_deleted=len(deleted_images),
+                    admin_email=admin_email
+                )
             
             insert_deleted_user = """
                 INSERT INTO proveo.users_deleted 
@@ -281,12 +340,17 @@ class DB:
             )
             
             await conn.execute("DELETE FROM proveo.users WHERE uuid=$1", user_uuid)
-            logger.info("admin_deleted_user_with_cascade", 
-                       deleted_user_uuid=str(user_uuid), 
-                       deleted_user_email=user["email"], 
-                       companies_deleted=len(companies), 
-                       admin_email=admin_email)
+            
+            logger.info(
+                "admin_deleted_user_with_cascade", 
+                deleted_user_uuid=str(user_uuid), 
+                deleted_user_email=user["email"], 
+                companies_deleted=len(companies), 
+                admin_email=admin_email
+            )
+            
             await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
+            
             return {
                 "user_uuid": str(user_uuid), 
                 "email": user["email"], 
