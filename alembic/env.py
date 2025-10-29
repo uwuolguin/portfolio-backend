@@ -11,8 +11,7 @@ try:
     from app.config import settings
     from app.schemas.models import Base
 except ImportError as e:
-    print (e)
-    raise ImportError(f"Could not import app modules. Make sure your app is in the Python path: {e}")
+    raise ImportError(f"Could not import app modules: {type(e).__name__}")
 
 config = context.config
 

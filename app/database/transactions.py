@@ -187,7 +187,7 @@ class DB:
                         company["updated_at"]
                     )
                 await conn.execute("DELETE FROM proveo.companies WHERE user_uuid = $1", user_uuid)
-                await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
+                await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
                 logger.info("user_companies_deleted", user_uuid=str(user_uuid), companies_count=len(companies))
             
             insert_deleted_user = """
@@ -286,7 +286,7 @@ class DB:
                        deleted_user_email=user["email"], 
                        companies_deleted=len(companies), 
                        admin_email=admin_email)
-            await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
+            await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
             return {
                 "user_uuid": str(user_uuid), 
                 "email": user["email"], 
@@ -349,7 +349,7 @@ class DB:
             update_query = f"UPDATE proveo.products SET {', '.join(update_fields)} WHERE uuid=${param_count} RETURNING uuid,name_es,name_en,created_at"
             row = await conn.fetchrow(update_query, *params)
             logger.info("product_updated", product_uuid=str(product_uuid))
-            await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
+            await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
             return dict(row)
         
     @staticmethod
@@ -373,7 +373,7 @@ class DB:
             await conn.execute(insert_deleted, product["uuid"], product["name_es"], product["name_en"], product["created_at"])
             await conn.execute("DELETE FROM proveo.products WHERE uuid=$1", product_uuid)
             logger.info("product_deleted", product_uuid=str(product_uuid))
-            await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
+            await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
             return {"uuid": str(product["uuid"]), "name_es": product["name_es"], "name_en": product["name_en"]}
 
     @staticmethod
@@ -420,7 +420,7 @@ class DB:
             update_query = "UPDATE proveo.communes SET name=$1 WHERE uuid=$2 RETURNING uuid,name,created_at"
             row = await conn.fetchrow(update_query, name, commune_uuid)
             logger.info("commune_updated", commune_uuid=str(commune_uuid))
-            await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
+            await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
             return dict(row)
 
     @staticmethod
@@ -444,7 +444,7 @@ class DB:
             await conn.execute(insert_deleted, commune["uuid"], commune["name"], commune["created_at"])
             await conn.execute("DELETE FROM proveo.communes WHERE uuid=$1", commune_uuid)
             logger.info("commune_deleted", commune_uuid=str(commune_uuid))
-            await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
+            await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
             return {"uuid": str(commune["uuid"]), "name": commune["name"]}
 
     @staticmethod
@@ -544,7 +544,7 @@ class DB:
                 description_es, description_en, address, phone, email, image_url, uuid_id
             )
             logger.info("company_created", company_uuid=str(row["uuid"]), user_uuid=str(user_uuid))
-            await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
+            await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
             return await DB.get_company_by_uuid(conn, row["uuid"])
 
     @staticmethod
@@ -601,7 +601,7 @@ class DB:
             update_query = f"UPDATE proveo.companies SET {', '.join(update_fields)} WHERE uuid=${param_count} RETURNING uuid"
             await conn.execute(update_query, *params)
             logger.info("company_updated", company_uuid=str(company_uuid), user_uuid=str(user_uuid))
-            await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
+            await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
             return await DB.get_company_by_uuid(conn, company_uuid)
 
     @staticmethod
@@ -622,7 +622,7 @@ class DB:
             await conn.execute(insert_deleted, *[company[f] for f in company.keys()])
             await conn.execute("DELETE FROM proveo.companies WHERE uuid=$1", company_uuid)
             logger.info("company_deleted", company_uuid=str(company_uuid))
-            await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
+            await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
             return True
 
     @staticmethod
@@ -702,7 +702,7 @@ class DB:
             """
             await conn.execute(insert_deleted, *[company[f] for f in company.keys()])
             await conn.execute("DELETE FROM proveo.companies WHERE uuid=$1", company_uuid)
-            await conn.execute("REFRESH MATERIALIZED VIEW proveo.company_search")
+            await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY proveo.company_search")
 
             logger.info("admin_deleted_company", company_uuid=str(company_uuid), admin_email=admin_email)
 
